@@ -13,7 +13,7 @@
  * keys, segments, OpenAI-style, forks).
  */
 
-const _AC410 = 'https://cdn.jsdelivr.net/gh/76836/AkariNet-AudioConsole@fb8936347264c4e15154d0dd4d358b7a4d350199/audioConsole-4.1.0.js';
+const _AC410 = './audioConsole-4.1.0.js';
 
 export {
     WakeWordProvider,
@@ -27,11 +27,11 @@ export {
     BusVAD,
     XlCache,
     RingBuffer
-} from 'https://cdn.jsdelivr.net/gh/76836/AkariNet-AudioConsole@fb8936347264c4e15154d0dd4d358b7a4d350199/audioConsole-4.1.0.js';
+} from './audioConsole-4.1.0.js';
 
-export { default, AkarinetVoice } from 'https://cdn.jsdelivr.net/gh/76836/AkariNet-AudioConsole@fb8936347264c4e15154d0dd4d358b7a4d350199/audioConsole-4.1.0.js';
+export { default, AkarinetVoice } from './audioConsole-4.1.0.js';
 
-import { AudioBus, WhisperCppProvider, AkarinetVoice } from 'https://cdn.jsdelivr.net/gh/76836/AkariNet-AudioConsole@fb8936347264c4e15154d0dd4d358b7a4d350199/audioConsole-4.1.0.js';
+import { AudioBus, WhisperCppProvider, AkarinetVoice } from './audioConsole-4.1.0.js';
 
 /** Worklet that emits fixed 1280-sample @ targetRate chunks, resampling if needed. */
 const FIXED_BUS_WORKLET_CODE = `

@@ -18,7 +18,11 @@
     const config = {
         wakeWordProvider: ls('ac41_wakeProvider', 'openwakeword'),
         openWakeWord: {
-            keywordURL: ls('ac41_owwUrl', './engine/models/v2_hey_A_kar_e.onnx'),
+            keywordURL: (function () {
+                var raw = ls('ac41_owwUrl', './engine/models/v2_hey_A_kar_e.onnx');
+                if (/^https?:\/\//i.test(raw)) return raw;
+                try { return new URL(raw, location.href).href; } catch (e) { return raw; }
+            })(),
             detectionThreshold: wakeThreshold
         },
         wakesoundURL: ls('ac41_tmUrl', 'https://teachablemachine.withgoogle.com/models/SwNFRUBwu/'),
@@ -37,7 +41,11 @@
         whisperCpp: ls('ac41_whisperUrl', '') ? { baseUrl: ls('ac41_whisperUrl', '') } : null,
         webSpeech: { lang: ls('ac41_webspeechLang', 'en-US') },
         vosk: {
-            modelUrl: ls('ac41_voskModelUrl', './models/vosk/vosk-model-small-en-us-0.15.tar.gz')
+            modelUrl: (function () {
+                var raw = ls('ac41_voskModelUrl', './models/vosk/vosk-model-small-en-us-0.15.tar.gz');
+                if (/^https?:\/\//i.test(raw)) return raw;
+                try { return new URL(raw, location.href).href; } catch (e) { return raw; }
+            })()
         },
 
         vadThreshold: lsNum('ac41_vadThreshold', 0.5),

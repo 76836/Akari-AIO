@@ -26,9 +26,8 @@
             ac41_voskModelUrl: './models/vosk/vosk-model-small-en-us-0.15.tar.gz',
             ac41_owwUrl: './engine/models/v2_hey_A_kar_e.onnx'
         };
-        Object.keys(d).forEach(function (k) {
-            if (!localStorage.getItem(k)) localStorage.setItem(k, d[k]);
-        });
+        // Always apply AIO offline defaults (overrides stale main-AkariNet localStorage)
+        Object.keys(d).forEach(function (k) { localStorage.setItem(k, d[k]); });
     })();
     </script>
     <style>
@@ -393,14 +392,14 @@
     <div id="overlay">
         <div class="console" id="boot-log" style="font-size: 1rem; color: #fff;"></div>
         <img src="./images/logo512.png" alt="Logo" style="position:fixed; top:50%; left:50%; transform:translate(-50%, -50%) scale(0.6);">
-        <img src="./images/loading.gif" alt="Loading" style="position:fixed; top:65%; left:50%; transform:translate(-50%, -50%) scale(0.2);">
+        <img src="./images/logo192.png" alt="Loading" style="position:fixed; top:65%; left:50%; transform:translate(-50%, -50%) scale(0.2);">
     </div>
     <div id="legacy-anchor"><div id="messages"></div></div>
     <div id="notificationArea" aria-live="polite"></div>
     <div id="screensaver-container" aria-hidden="true"></div>
     <div id="chat-box" class="icemorphic chat-box collapsed" style="border: none;" aria-live="polite">
         <div class="chat-header">
-            <button id="settingsButton" class="icemorphic toggle-btn" onclick="app.ui.openWindow('./settings')" aria-label="Open settings">⚙</button>
+            <button id="settingsButton" class="icemorphic toggle-btn" onclick="loadscreen('Settings disabled in Akari-AIO')" aria-label="Open settings">⚙</button>
             <button id="historyButton" class="icemorphic toggle-btn" type="button" aria-label="Chat history" title="Chat history">☰</button>
             <div class="chat-title">loading...</div>
             <div class="chat-actions">
