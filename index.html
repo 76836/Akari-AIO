@@ -18,7 +18,7 @@
             akari_setupComplete: '1',
             selectedWakeScript: './engine/audioConsole.js',
             selectedAvatarScript: './characters/akari/VRM4.js',
-            selectedAIScript: './characters/akari/Llama1B.js',
+            selectedAIScript: './characters/akari/lcpp.js',
             selectedVoiceScript: './characters/akari/PiperTTS.js',
             selectedReflexScript: '',
             selectedBKGURL: '',
@@ -546,7 +546,6 @@
     </script>
 
     <script src="./engine/autopilot/bridge.js"></script>
-    <script src="https://76836.github.io/AkariNet-Automata/ATPKLoader-1.1.0.js"></script>
     <script>
 (function() {
     'use strict';
@@ -564,6 +563,7 @@
     };
 
     async function initAkariAutomata() {
+        return; // Akari-AIO: Automata disabled (no ATPK packages)
         if (typeof AutomatonLoader === 'undefined') return;
         const loader = new AutomatonLoader();
         window.automatonLoader = loader;

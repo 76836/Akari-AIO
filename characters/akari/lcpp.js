@@ -30,10 +30,11 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
   function getAutoServerDetails() {
     try {
       const servers = JSON.parse(localStorage.getItem('lcpp_servers') || '[]');
-      return servers.find(s => s.online) || null;
-    } catch (e) {
-      return null;
-    }
+      const found = servers.find(s => s.online) || null;
+      if (found) return found;
+    } catch (e) {}
+    // Akari-AIO: default to local llama.cpp when nothing is registered yet
+    return { url: 'http://127.0.0.1:8080', model: 'local', online: true };
   }
 
   function actionsEnabled() {

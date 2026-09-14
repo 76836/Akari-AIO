@@ -128,7 +128,7 @@ loadscreen("(5th revision) Loading Akari's VRM...");
   const middlemanLoader = document.createElement('script');
   middlemanLoader.type = 'module';
   middlemanLoader.textContent = `
-    import analyzeEmotion from "./engine/emotionEngine/engine.js";
+    import analyzeEmotion from "/engine/emotionEngine/engine.js";
 
     let idleInterval = null;
     let sequenceTimeout = null;

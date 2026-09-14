@@ -261,11 +261,10 @@
         if (wakeResetTimer) { clearTimeout(wakeResetTimer); wakeResetTimer = null; }
         visualState = 'idle';
         statusBar.classList.remove('active', 'listening', 'wake', 'processing', 'result');
-        if (window.app?.ui?.resetMic) app.ui.resetMic();
-        else {
-            const btn = document.getElementById('micbutton');
-            if (btn) { btn.className = 'button-long'; btn.innerText = 'voice'; }
-        }
+        // Do NOT call app.ui.resetMic() here — it often calls whisperTranscriber.stop()
+        // which is our bridge.stop(), which calls resetVisuals() again (infinite recursion).
+        const btn = document.getElementById('micbutton');
+        if (btn) { btn.className = 'button-long'; btn.innerText = 'voice'; }
         apStatus('Audio Console idle', { busy: false, idle: true });
     }
 
