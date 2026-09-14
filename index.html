@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en" id="html">
+<head>
+  <meta charset="utf-8" />
+  <title>Akari-AIO (Offline)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#020817">
+  <link rel="manifest" href="./app.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="./images/apple-touch-icon.png">
+  <link rel="icon" href="./images/favicon.ico">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #020817;
+      --panel: rgba(15, 23, 42, 0.85);
+      --border: rgba(148, 163, 184, 0.25);
+      --text: #ecf7ff;
+      --muted: #94a3b8;
+      --accent: #7dd3fc;
+      --success: #5eead4;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: radial-gradient(ellipse at top, #0b1220 0%, var(--bg) 70%);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 12px;
+      gap: 10px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 4px;
+    }
+    header h1 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .badge {
+      font-size: 0.7rem;
+      background: rgba(125, 211, 252, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(125, 211, 252, 0.35);
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+    #status {
+      font-size: 0.8rem;
+      color: var(--muted);
+      min-height: 1.2em;
+    }
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .msg {
+      max-width: 92%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      line-height: 1.45;
+      font-size: 0.95rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: rgba(125, 211, 252, 0.18);
+      border: 1px solid rgba(125, 211, 252, 0.3);
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid var(--border);
+    }
+    .msg.system {
+      align-self: center;
+      font-size: 0.8rem;
+      color: var(--muted);
+      background: transparent;
+      border: none;
+    }
+    #controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    #input {
+      flex: 1;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      color: var(--text);
+      padding: 12px 14px;
+      font-size: 1rem;
+      outline: none;
+    }
+    #input:focus { border-color: var(--accent); }
+    button {
+      background: rgba(125, 211, 252, 0.15);
+      border: 1px solid rgba(125, 211, 252, 0.4);
+      color: var(--accent);
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover { background: rgba(125, 211, 252, 0.25); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.mic.active {
+      background: rgba(94, 234, 212, 0.2);
+      border-color: var(--success);
+      color: var(--success);
+    }
+    #progress {
+      height: 4px;
+      background: rgba(148, 163, 184, 0.2);
+      border-radius: 2px;
+      overflow: hidden;
+      display: none;
+    }
+    #progress > div {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width 0.25s ease;
+    }
+    .footer {
+      font-size: 0.7rem;
+      color: var(--muted);
+      text-align: center;
+      padding-bottom: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Akari <span class="badge">AIO · Offline</span></h1>
+      <div id="status">Starting…</div>
+    </header>
+    <div id="progress"><div id="progressBar"></div></div>
+    <div id="chat"></div>
+    <div id="controls">
+      <button id="micBtn" type="button" title="Push to talk / wake">🎙</button>
+      <input id="input" type="text" placeholder="Type or speak to Akari…" autocomplete="off" />
+      <button id="sendBtn" type="button">Send</button>
+    </div>
+    <div class="footer">Vosk + PiperTTS local · prefers llama.cpp on localhost</div>
+  </div>
+
+  <script>
+  // Hardcoded offline defaults — no setup page, no settings page
+  (function () {
+    const defaults = {
+      ac41_srProvider: 'vosk',
+      ac41_voskModelUrl: './models/vosk/vosk-model-small-en-us-0.15.tar.gz',
+      ac41_owwUrl: './models/wake/v2_hey_A_kar_e.onnx',
+      ac41_wakeProvider: 'openwakeword',
+      selectedVoiceScript: 'PiperTTS',
+      selectedAIScript: 'llama.cpp',
+      akari_setupComplete: '1',
+      akari_aio: '1'
+    };
+    Object.keys(defaults).forEach(k => {
+      if (!localStorage.getItem(k)) localStorage.setItem(k, defaults[k]);
+    });
+  })();
+  </script>
+
+  <script>
+  const chatEl = document.getElementById('chat');
+  const inputEl = document.getElementById('input');
+  const sendBtn = document.getElementById('sendBtn');
+  const micBtn = document.getElementById('micBtn');
+  const statusEl = document.getElementById('status');
+  const progressEl = document.getElementById('progress');
+  const progressBar = document.getElementById('progressBar');
+
+  function addMsg(role, text) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + role;
+    div.textContent = text;
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function setStatus(t) { statusEl.textContent = t; }
+
+  function setProgress(pct, label) {
+    if (pct == null || pct < 0) {
+      progressEl.style.display = 'none';
+      return;
+    }
+    progressEl.style.display = 'block';
+    progressBar.style.width = Math.min(100, Math.max(0, pct)) + '%';
+    if (label) setStatus(label);
+  }
+
+  // Very small llama.cpp client (OpenAI-compatible /completions or /v1/chat/completions)
+  async function askLlama(prompt) {
+    const ports = [8080, 8443, 11434, 1234, 5000];
+    const hosts = ['127.0.0.1', 'localhost'];
+    const paths = ['/v1/chat/completions', '/completion', '/completions'];
+
+    for (const host of hosts) {
+      for (const port of ports) {
+        for (const path of paths) {
+          const url = `http://${host}:${port}${path}`;
+          try {
+            const body = path.includes('chat')
+              ? {
+                  model: 'local',
+                  messages: [
+                    { role: 'system', content: 'You are Akari, a helpful, slightly sassy offline AI companion. Keep replies concise and natural.' },
+                    { role: 'user', content: prompt }
+                  ],
+                  temperature: 0.7,
+                  max_tokens: 512
+                }
+              : { prompt: `You are Akari, a helpful offline companion.\nUser: ${prompt}\nAkari:`, n_predict: 256, temperature: 0.7 };
+
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 2500);
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: ctrl.signal
+            });
+            clearTimeout(t);
+            if (!res.ok) continue;
+            const data = await res.json();
+            if (data.choices && data.choices[0]) {
+              const c = data.choices[0];
+              return (c.message && c.message.content) || c.text || c.content || JSON.stringify(c);
+            }
+            if (data.content) return data.content;
+          } catch (e) { /* try next */ }
+        }
+      }
+    }
+    return null;
+  }
+
+  async function handleUserText(text) {
+    text = (text || '').trim();
+    if (!text) return;
+    addMsg('user', text);
+    inputEl.value = '';
+    setStatus('Thinking…');
+    sendBtn.disabled = true;
+
+    let reply = await askLlama(text);
+    if (!reply) {
+      reply = "I couldn't reach a local llama.cpp server. Start one (or package this UI as a llamafile) and I'll answer properly. For now I'm just the offline voice shell.";
+    }
+    addMsg('assistant', reply);
+    setStatus('Ready');
+    sendBtn.disabled = false;
+
+    // Optional: speak with Piper if available later
+    if (window.AkariSpeak) {
+      try { window.AkariSpeak(reply); } catch (_) {}
+    }
+  }
+
+  sendBtn.addEventListener('click', () => handleUserText(inputEl.value));
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleUserText(inputEl.value);
+    }
+  });
+
+  // ---- Audio Console integration (local Vosk) ----
+  let acReady = false;
+
+  async function initAudio() {
+    setStatus('Loading Audio Console…');
+    setProgress(5, 'Loading voice engine…');
+    try {
+      // Load the vendored console
+      const mod = await import('./vendor/audioConsole-4.2.1.js');
+      setProgress(20, 'Initializing mic & VAD…');
+
+      // Prefer the adapter pattern used by main Akari if present
+      if (window.AkariAudioConsole && typeof window.AkariAudioConsole.init === 'function') {
+        await window.AkariAudioConsole.init();
+      }
+
+      // Listen for results
+      window.addEventListener('akari:user-input', (ev) => {
+        const t = (ev.detail && (ev.detail.text || ev.detail)) || '';
+        if (t) handleUserText(String(t));
+      });
+
+      // Fallback: some versions emit different events
+      window.addEventListener('vosk-result', (ev) => {
+        if (ev.detail && ev.detail.text) handleUserText(ev.detail.text);
+      });
+
+      acReady = true;
+      setProgress(-1);
+      setStatus('Voice ready (Vosk local)');
+      addMsg('system', 'Offline mode · Vosk + Piper assets present · AI expects llama.cpp on localhost');
+    } catch (err) {
+      console.error(err);
+      setProgress(-1);
+      setStatus('Voice engine load failed — text still works');
+      addMsg('system', 'Could not fully init Audio Console. Type to chat. Check console for details.');
+    }
+  }
+
+  micBtn.addEventListener('click', () => {
+    if (!acReady) {
+      setStatus('Voice not ready yet');
+      return;
+    }
+    micBtn.classList.toggle('active');
+    // Trigger manual listen if the console exposes it
+    if (window.AkariAudioConsole && window.AkariAudioConsole.toggleListen) {
+      window.AkariAudioConsole.toggleListen();
+    } else {
+      window.dispatchEvent(new CustomEvent('akari:manual-listen'));
+    }
+  });
+
+  // Boot
+  addMsg('system', 'Akari-AIO offline shell starting…');
+  initAudio();
+  </script>
+</body>
+</html>
