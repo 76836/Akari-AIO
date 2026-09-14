@@ -53,3 +53,11 @@ vendor/                 # audioConsole-4.2.1.js
 ```
 
 Derived from [76836/Akari](https://github.com/76836/Akari) — curated offline subset, not a GitHub fork.
+
+
+## llamafile builder
+
+Browser tool to pack a GGUF + llamafile runtime (optional **Akari-AIO** UI with Cache Storage).
+
+Open `llamafile-builder.html` via any static server, or:
+https://github.com/76836/Akari-AIO/blob/main/llamafile-builder.html
