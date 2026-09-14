@@ -18,7 +18,7 @@
     const config = {
         wakeWordProvider: ls('ac41_wakeProvider', 'openwakeword'),
         openWakeWord: {
-            keywordURL: ls('ac41_owwUrl', './models/wake/v2_hey_A_kar_e.onnx'),
+            keywordURL: ls('ac41_owwUrl', './engine/models/v2_hey_A_kar_e.onnx'),
             detectionThreshold: wakeThreshold
         },
         wakesoundURL: ls('ac41_tmUrl', 'https://teachablemachine.withgoogle.com/models/SwNFRUBwu/'),
@@ -271,7 +271,7 @@
 
     let wakeAudio = null;
     function initWakeAudio() {
-        wakeAudio = new Audio('https://76836.github.io/Akari/characters/akari/Summon.mp3');
+        wakeAudio = new Audio('./characters/akari/Summon.mp3');
         wakeAudio.preload = 'auto';
         wakeAudio.volume = 1.0;
     }

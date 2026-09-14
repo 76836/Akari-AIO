@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autodetect llama.cpp Servers</title>
+    <style>
+        :root {
+            --md-primary: #8ab4f8;
+            --md-on-primary: #0f172a;
+            --md-primary-container: #1e293b;
+            --md-on-primary-container: #e2e8f0;
+            --md-surface: #0f172a;
+            --md-on-surface: #e2e8f0;
+            --md-surface-variant: #1e293b;
+            --md-on-surface-variant: #94a3b8;
+            --md-outline: #475569;
+            --md-error: #f97316;
+            --md-success: #34d399;
+        }
+
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body {
+            font-family: 'Roboto', sans-serif;
+            background: #1a1a1a;
+            color: var(--md-on-surface);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container { width: 100%; max-width: 600px; }
+
+        header { margin-bottom: 24px; text-align: center; }
+        header h1 { font-family: 'Google Sans', sans-serif; font-size: 28px; margin: 0; color: var(--md-primary); }
+        header p { font-size: 14px; color: var(--md-on-surface-variant); margin-top: 6px; }
+
+        .card {
+            background: rgba(15, 23, 42, 0.85);
+            border: 1px solid var(--md-outline);
+            border-bottom: 5px solid var(--md-outline);
+            border-left: 5px solid var(--md-outline);
+            border-radius: 0px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.40);
+        }
+
+        .input-group { margin-bottom: 16px; }
+        label { display: block; font-size: 12px; margin-bottom: 6px; font-weight: 500; color: var(--md-on-surface-variant); text-transform: uppercase; letter-spacing: 0.5px; }
+        input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.40);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.8);
+            font-size: 16px;
+            color: var(--md-on-surface);
+            outline: none;
+            transition: border 0.2s, box-shadow 0.2s;
+        }
+        input:focus { border: 1px solid var(--md-primary); box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.20); }
+        textarea.sysprompt {
+            width: 100%;
+            min-height: 160px;
+            padding: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.40);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.8);
+            font-size: 14px;
+            line-height: 1.45;
+            color: var(--md-on-surface);
+            outline: none;
+            resize: vertical;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+        textarea.sysprompt:focus { border: 1px solid var(--md-primary); box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.20); }
+        .tools-note { font-size: 12px; color: var(--md-on-surface-variant); line-height: 1.45; margin-top: 8px; }
+        .tools-note code { background: rgba(0,0,0,.35); padding: 1px 5px; border-radius: 4px; }
+
+        .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+        .btn-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+        button {
+            padding: 12px;
+            border-radius: 100px;
+            border: none;
+            font-weight: 500;
+            font-size: 14px;
+            cursor: pointer;
+            transition: opacity 0.2s, filter 0.2s, transform 0.12s;
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: #2f5fcc; color: #f8fafc; }
+        .btn-primary:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+        .btn-tonal { background: rgba(148, 163, 184, 0.24); color: #e2e8f0; }
+        .btn-tonal:hover:not(:disabled) { background: rgba(148, 163, 184, 0.36); }
+        .btn-outline { background: transparent; border: 1px solid var(--md-outline); color: var(--md-on-surface); }
+        .btn-danger { background: rgba(249, 115, 22, 0.2); color: #f97316; border: 1px solid #f97316; }
+        .btn-local { background: rgba(52, 211, 153, 0.2); color: #34d399; border: 1px solid #34d399; }
+
+        .progress-track { height: 6px; background: rgba(148, 163, 184, 0.25); border-radius: 3px; overflow: hidden; margin: 16px 0; display: none; position: relative; }
+        .progress-track.active::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -20%;
+            height: 100%;
+            width: 20%;
+            background: linear-gradient(120deg, rgba(138, 180, 248, 0.9), rgba(138, 180, 248, 0.5));
+            border-radius: 3px;
+            animation: sweep 1.1s ease-in-out infinite;
+            z-index: 2;
+            pointer-events: none;
+        }
+        @keyframes sweep {
+            0% { left: -20%; }
+            50% { left: 100%; }
+            100% { left: -20%; }
+        }
+        .progress-fill { height: 100%; background: #8ab4f8; width: 0%; transition: width 0.3s linear; z-index:1; }
+
+        .advanced-toggle {
+            cursor: pointer;
+            font-size: 13px;
+            color: var(--md-primary);
+            text-decoration: underline;
+            display: block;
+            text-align: center;
+            margin-top: 10px;
+        }
+        #advancedMenu {
+            display: none;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--md-outline);
+        }
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 40px;
+            height: 20px;
+        }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #334155;
+            transition: .4s;
+            border-radius: 20px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 14px; width: 14px;
+            left: 3px; bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider { background-color: var(--md-primary); }
+        input:checked + .slider:before { transform: translateX(20px); }
+
+        .port-tag {
+            display: inline-flex;
+            align-items: center;
+            background: var(--md-primary-container);
+            color: var(--md-primary);
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin-right: 6px;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+        .port-tag span { cursor: pointer; margin-left: 6px; font-weight: bold; }
+
+        .server-item {
+            background: rgba(15, 23, 42, 0.82);
+            padding: 16px;
+            margin-bottom: 12px;
+            border: 1px solid var(--md-outline);
+            border-bottom: 5px solid var(--md-outline);
+            border-left: 5px solid var(--md-outline);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .server-header { display: flex; justify-content: space-between; align-items: flex-start; }
+        .server-url { font-weight: 500; color: #8ab4f8; font-family: monospace; word-break: break-all; }
+        .status-badge { font-size: 10px; padding: 2px 8px; border-radius: 8px; text-transform: uppercase; font-weight: bold; white-space: nowrap; }
+        .status-online { background: rgba(52, 211, 153, 0.16); color: #22c55e; }
+        .status-offline { background: rgba(248, 113, 16, 0.16); color: #fb923c; }
+        .status-checking { background: rgba(148, 163, 184, 0.18); color: #94a3b8; }
+
+        .server-details { font-size: 13px; color: var(--md-on-surface-variant); line-height: 1.4; }
+        .action-row { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+        .delete-btn { color: #f97316; background: none; border: none; font-size: 12px; padding: 0; text-decoration: underline; cursor: pointer; }
+        .logon-btn { color: var(--md-primary); background: none; border: none; font-size: 12px; padding: 0; text-decoration: underline; cursor: pointer; }
+
+        #log { font-family: monospace; font-size: 12px; margin-top: 12px; color: #cbd5e1; max-height: 88px; overflow-y: auto; border-top: 1px solid rgba(148, 163, 184, 0.3); padding-top: 8px; }
+
+        #alertModal {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: #1e293b; border: 1px solid var(--md-outline); padding: 20px;
+            z-index: 1000; display: none; border-radius: 0px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border-bottom: 5px solid red;
+            border-left: 5px solid red;
+            text-align: center; min-width: 300px;
+        }
+        #modalOverlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7); z-index: 999; display: none;
+        }
+
+        .hint {
+            font-size: 12px;
+            color: var(--md-on-surface-variant);
+            margin: 8px 0 0;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+
+<div id="modalOverlay"></div>
+<div id="alertModal">
+    <p id="modalText"></p>
+    <button class="btn-primary" onclick="closeModal()">Close</button>
+</div>
+
+<div class="container">
+    <header>
+        <h1>Autodetect Llama.CPP Servers</h1>
+        <p>Scan your LAN or connect to a server on this device (localhost).</p>
+    </header>
+
+    <div class="card">
+        <div class="input-group">
+            <label>Subnet Base:</label>
+            <input type="text" id="subnetInput" placeholder="e.g. 192.168.1">
+        </div>
+        <div class="btn-row-3">
+            <button class="btn-primary" id="scanBtn">Start Scan</button>
+            <button class="btn-tonal" id="detectBtn">Auto Detect</button>
+            <button class="btn-local" id="localhostBtn">Check Localhost</button>
+        </div>
+        
+        <a class="advanced-toggle" onclick="toggleAdvanced()">Advanced Settings</a>
+        
+        <div id="advancedMenu">
+            <div class="setting-row">
+                <span>Use HTTPS for LAN scan only</span>
+                <label class="switch">
+                    <input type="checkbox" id="httpsToggle">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <p class="hint" style="margin-top:-4px;margin-bottom:12px;">Does not affect localhost. Leave off for plain llama.cpp on LAN; on only if you use the Akari AI Server HTTPS proxy.</p>
+            
+            <div class="input-group">
+                <label>Scan Ports:</label>
+                <div id="portList" style="margin-bottom: 8px;"></div>
+                <div style="display: flex; gap: 8px;">
+                    <input type="number" id="newPortInput" placeholder="Add port..." style="padding: 8px;">
+                    <button class="btn-tonal" style="padding: 8px 16px; border-radius: 8px;" onclick="addPort()">Add</button>
+                </div>
+            </div>
+
+            <div class="btn-row">
+                <button class="btn-danger" onclick="forgetUnresponsive()">Forget Unresponsive</button>
+                <button class="btn-danger" style="background: rgba(249, 115, 22, 0.4);" onclick="forgetAll()">Forget All</button>
+            </div>
+        </div>
+
+        <div class="progress-track" id="progressTrack">
+            <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <div id="log">Ready to scan local network or localhost...</div>
+        <p class="hint">Localhost uses HTTP by default (browsers allow it from HTTPS pages). The HTTPS toggle above only applies to LAN subnet scans.</p>
+    </div>
+
+
+    <div class="card" id="systemPromptCard">
+        <div class="input-group" style="margin-bottom:8px;">
+            <label>System prompt (llama.cpp)</label>
+            <textarea class="sysprompt" id="systemPrompt" spellcheck="true" placeholder="Personality and instructions for the model…"></textarea>
+        </div>
+        <div class="btn-row">
+            <button type="button" class="btn-primary" id="savePromptBtn">Save system prompt</button>
+            <button type="button" class="btn-tonal" id="resetPromptBtn">Reset to default</button>
+        </div>
+        <p class="tools-note" id="toolsNote">
+            When <b>AkariNet Actions</b> is enabled, a tool-use appendix is added automatically at chat time
+            (you do not need to paste it here). It tells the model to use
+            <code>&lt;action&gt;tool_search&lt;/action&gt;</code> and other tools.
+        </p>
+        <p class="hint" id="promptStatus" style="margin-top:8px;"></p>
+    </div>
+
+    <div id="serverList"></div>
+</div>
+
+<script>
+    // State
+    let servers = JSON.parse(localStorage.getItem('lcpp_servers') || '[]');
+    const savedConfig = localStorage.getItem('lcpp_config');
+    let config = savedConfig
+        ? JSON.parse(savedConfig)
+        : { https: false, ports: [8443, 8080, 11434] };
+    // Migrate older configs that only had 8443
+    if (!Array.isArray(config.ports) || config.ports.length === 0) {
+        config.ports = [8443, 8080, 11434];
+    }
+    // Never force-overwrite the user's https preference. Default is HTTP.
+    if (typeof config.https !== 'boolean') config.https = false;
+
+    let isScanning = false;
+    let activePopups = new Map();
+
+    const subnetInput = document.getElementById('subnetInput');
+    const logEl = document.getElementById('log');
+    const serverListEl = document.getElementById('serverList');
+    const progressTrack = document.getElementById('progressTrack');
+    const progressFill = document.getElementById('progressFill');
+    const portListEl = document.getElementById('portList');
+    const httpsToggle = document.getElementById('httpsToggle');
+
+    function customAlert(msg) {
+        document.getElementById('modalText').innerText = msg;
+        document.getElementById('alertModal').style.display = 'block';
+        document.getElementById('modalOverlay').style.display = 'block';
+    }
+
+    function closeModal() {
+        document.getElementById('alertModal').style.display = 'none';
+        document.getElementById('modalOverlay').style.display = 'none';
+    }
+
+    // Apply saved preference once — do not rewrite it from page protocol
+    httpsToggle.checked = !!config.https;
+    httpsToggle.onchange = (e) => {
+        config.https = e.target.checked;
+        saveConfig();
+        writeLog(`LAN scan protocol set to ${config.https ? 'HTTPS' : 'HTTP'}.`);
+    };
+
+    function saveConfig() {
+        localStorage.setItem('lcpp_config', JSON.stringify(config));
+        renderPorts();
+    }
+
+    function saveServers() {
+        localStorage.setItem('lcpp_servers', JSON.stringify(servers));
+    }
+
+    function writeLog(text) {
+        logEl.textContent = `> ${text}`;
+    }
+
+    function toggleAdvanced() {
+        const menu = document.getElementById('advancedMenu');
+        menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
+    }
+
+    function addPort() {
+        const input = document.getElementById('newPortInput');
+        const val = parseInt(input.value);
+        if (val && !config.ports.includes(val)) {
+            config.ports.push(val);
+            saveConfig();
+            input.value = '';
+        }
+    }
+
+    function removePort(port) {
+        config.ports = config.ports.filter(p => p !== port);
+        saveConfig();
+    }
+
+    function renderPorts() {
+        portListEl.innerHTML = config.ports.map(p => `
+            <div class="port-tag">${p}<span onclick="removePort(${p})">&times;</span></div>
+        `).join('');
+    }
+
+    function renderServers() {
+        serverListEl.innerHTML = servers.length === 0 ?
+            '<p style="text-align:center; color:#999; font-size:14px;">No servers saved yet.</p>' : '';
+
+        const sorted = [...servers].sort((a, b) => (b.online === a.online) ? 0 : b.online ? 1 : -1);
+
+        sorted.forEach((s) => {
+            const item = document.createElement('div');
+            item.className = 'server-item';
+
+            const statusClass = s.checking ? 'status-checking' : (s.online ? 'status-online' : 'status-offline');
+            const statusText = s.checking ? 'Checking...' : (s.online ? 'Online' : 'Offline');
+            const isLocal = s.url.includes('127.0.0.1') || s.url.includes('localhost');
+
+            item.innerHTML = `
+                <div class="server-header">
+                    <span class="server-url">${s.url}${isLocal ? ' <span style="color:#34d399;font-size:11px;">(local)</span>' : ''}</span>
+                    <span class="status-badge ${statusClass}">${statusText}</span>
+                </div>
+                <div class="server-details">
+                    ${s.model ? `<b>Model:</b> ${s.model}<br>` : ''}
+                    ${s.slots ? `<b>Slots:</b> ${s.slots}<br>` : ''}
+                    ${s.lastSeen ? `<b>Last Seen:</b> ${new Date(s.lastSeen).toLocaleTimeString()}` : 'Never seen online'}
+                </div>
+                <div class="action-row">
+                    <button class="delete-btn" onclick="removeServer('${s.url}')">Forget Server</button>
+                    ${!s.online && !s.checking ? `<button class="logon-btn" onclick="logonToServer('${s.url}')">Logon / Fix SSL</button>` : ''}
+                </div>
+            `;
+            serverListEl.appendChild(item);
+        });
+    }
+
+    async function checkServerHealth(url) {
+        const server = servers.find(s => s.url === url);
+        if (!server) return;
+
+        server.checking = true;
+        renderServers();
+
+        try {
+            const res = await fetch(`${url}/v1/models`, { signal: AbortSignal.timeout(2500) });
+            if (res.ok) {
+                const data = await res.json();
+                server.model = data.data?.[0]?.id || 'Unknown Model';
+                server.online = true;
+                server.lastSeen = Date.now();
+
+                if (activePopups.has(url)) {
+                    const popup = activePopups.get(url);
+                    if (!popup.closed) popup.close();
+                    activePopups.delete(url);
+                }
+            } else {
+                server.online = false;
+            }
+        } catch (e) {
+            server.online = false;
+        } finally {
+            server.checking = false;
+            saveServers();
+            renderServers();
+        }
+    }
+
+    function addServerIfNew(url) {
+        if (!servers.find(s => s.url === url)) {
+            servers.push({ url, online: true, lastSeen: Date.now() });
+            saveServers();
+            checkServerHealth(url);
+            return true;
+        }
+        checkServerHealth(url);
+        return false;
+    }
+
+    window.logonToServer = (url) => {
+        const popup = window.open(`${url}/ping`, 'LCPP_Logon', 'width=600,height=500');
+        if (!popup) {
+            customAlert("Popup blocked! Please allow popups for this site.");
+            return;
+        }
+
+        activePopups.set(url, popup);
+        writeLog(`Attempting logon to ${url}...`);
+
+        const interval = setInterval(async () => {
+            const s = servers.find(sv => sv.url === url);
+            if (!s || s.online) {
+                clearInterval(interval);
+                return;
+            }
+
+            if (popup.closed) {
+                clearInterval(interval);
+                activePopups.delete(url);
+                await checkServerHealth(url);
+                const finalS = servers.find(sv => sv.url === url);
+                if (!finalS || !finalS.online) {
+                    customAlert(`Failed to connect to ${url}. Ensure the server is running and that you have accepted any SSL certificates.`);
+                }
+                return;
+            }
+
+            await checkServerHealth(url);
+        }, 1500);
+    };
+
+    async function scanNetwork() {
+        if (isScanning) return;
+        const base = subnetInput.value.trim();
+        if (!base) return writeLog("Enter a subnet first!");
+
+        isScanning = true;
+        progressTrack.style.display = 'block';
+        progressTrack.classList.add('active');
+        document.getElementById('scanBtn').disabled = true;
+
+        const protocol = config.https ? 'https' : 'http';
+        const tasks = [];
+        for (let i = 1; i < 255; i++) {
+            config.ports.forEach(p => tasks.push(`${protocol}://${base}.${i}:${p}`));
+        }
+
+        let completed = 0;
+        const total = tasks.length;
+        const batchSize = 30;
+
+        for (let i = 0; i < tasks.length; i += batchSize) {
+            if (!isScanning) break;
+            const batch = tasks.slice(i, i + batchSize);
+
+            await Promise.all(batch.map(async (url) => {
+                try {
+                    const res = await fetch(`${url}/v1/models`, { signal: AbortSignal.timeout(1200) });
+                    if (res.ok) addServerIfNew(url);
+                } catch (e) { /* ignore */ }
+                completed++;
+                progressFill.style.width = `${(completed / total) * 100}%`;
+                writeLog(`Scanning... ${completed}/${total}`);
+            }));
+        }
+
+        isScanning = false;
+        progressTrack.style.display = 'none';
+        progressTrack.classList.remove('active');
+        document.getElementById('scanBtn').disabled = false;
+        writeLog("Scan complete.");
+        renderServers();
+    }
+
+    /**
+     * Localhost is independent of the LAN HTTPS toggle.
+     * Prefer HTTP first (plain llama.cpp), then HTTPS (Akari AI Server proxy).
+     */
+    async function checkLocalhost() {
+        if (isScanning) return;
+        isScanning = true;
+        progressTrack.style.display = 'block';
+        progressTrack.classList.add('active');
+        progressFill.style.width = '0%';
+        document.getElementById('localhostBtn').disabled = true;
+        writeLog("Checking localhost (HTTP first)...");
+
+        const hosts = ['127.0.0.1', 'localhost'];
+        // HTTP first so plain llama.cpp is found before any HTTPS attempt
+        const protocols = ['http', 'https'];
+        const extraPorts = [8080, 8081, 8443, 11434, 1234, 3000, 5000, 8000];
+        const ports = [...new Set([...config.ports, ...extraPorts])];
+
+        const tasks = [];
+        // Prefer 127.0.0.1 + HTTP first
+        protocols.forEach(proto => {
+            hosts.forEach(host => {
+                ports.forEach(port => {
+                    tasks.push(`${proto}://${host}:${port}`);
+                });
+            });
+        });
+
+        let completed = 0;
+        const total = tasks.length;
+        const found = [];
+        const batchSize = 16;
+
+        for (let i = 0; i < tasks.length; i += batchSize) {
+            if (!isScanning) break;
+            const batch = tasks.slice(i, i + batchSize);
+
+            await Promise.all(batch.map(async (url) => {
+                try {
+                    const res = await fetch(`${url}/v1/models`, {
+                        signal: AbortSignal.timeout(1200),
+                        mode: 'cors'
+                    });
+                    if (res.ok) {
+                        const added = addServerIfNew(url);
+                        if (added || !found.includes(url)) found.push(url);
+                    }
+                } catch (e) { /* ignore timeouts / refused */ }
+                completed++;
+                progressFill.style.width = `${(completed / total) * 100}%`;
+            }));
+            writeLog(`Localhost check... ${completed}/${total}${found.length ? ` — found ${found.length}` : ''}`);
+        }
+
+        isScanning = false;
+        progressTrack.style.display = 'none';
+        progressTrack.classList.remove('active');
+        document.getElementById('localhostBtn').disabled = false;
+
+        if (found.length > 0) {
+            writeLog(`Found ${found.length} localhost server(s).`);
+        } else {
+            writeLog("No llama.cpp server on localhost. Start one (e.g. llama-server --port 8080 --host 127.0.0.1) then try again.");
+        }
+        renderServers();
+    }
+
+    window.removeServer = (url) => {
+        servers = servers.filter(s => s.url !== url);
+        saveServers();
+        renderServers();
+    };
+
+    window.forgetUnresponsive = () => {
+        servers = servers.filter(s => s.online);
+        saveServers();
+        renderServers();
+        writeLog("Forgot all offline servers.");
+    };
+
+    window.forgetAll = () => {
+        servers = [];
+        saveServers();
+        renderServers();
+        writeLog("Server list cleared.");
+    };
+
+    document.getElementById('detectBtn').onclick = async () => {
+        writeLog("Starting detection...");
+        progressTrack.style.display = 'block';
+        progressTrack.classList.add('active');
+        progressFill.style.width = '0%';
+
+        const getWebRTCIP = () => {
+            return new Promise((resolve) => {
+                const pc = new RTCPeerConnection({ iceServers: [] });
+                pc.createDataChannel('');
+                pc.onicecandidate = e => {
+                    if (!e.candidate) return resolve(null);
+                    const m = e.candidate.candidate.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+                    if (m && !m[1].startsWith('127.')) resolve(m[1]);
+                };
+                pc.createOffer().then(o => pc.setLocalDescription(o));
+                setTimeout(() => resolve(null), 600);
+            });
+        };
+
+        const runBatchScan = async () => {
+            const batchSize = 32;
+            const timeoutMs = 300;
+            for (let i = 0; i <= 255; i += batchSize) {
+                const batch = [];
+                for (let j = i; j < i + batchSize && j <= 255; j++) {
+                    const subnet = `192.168.${j}`;
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), timeoutMs);
+                    batch.push(
+                        fetch(`http://${subnet}.1`, { mode: 'no-cors', signal: controller.signal })
+                            .then(() => { clearTimeout(timer); return subnet; })
+                            .catch(() => { clearTimeout(timer); return null; })
+                    );
+                }
+                const results = await Promise.all(batch);
+                const found = results.find(res => res !== null);
+                if (found) return found;
+            }
+            return null;
+        };
+
+        const rtcResult = await getWebRTCIP();
+        if (rtcResult) {
+            const sub = rtcResult.split('.').slice(0, 3).join('.');
+            subnetInput.value = sub;
+            writeLog(`Detected: ${sub}.x`);
+        } else {
+            const detectedSubnet = await runBatchScan();
+            if (detectedSubnet) {
+                subnetInput.value = detectedSubnet;
+                writeLog(`Detected: ${detectedSubnet}.x`);
+            } else {
+                writeLog("Detection failed. Enter subnet manually.");
+            }
+        }
+        progressTrack.style.display = 'none';
+        progressTrack.classList.remove('active');
+    };
+
+    document.getElementById('scanBtn').onclick = scanNetwork;
+    document.getElementById('localhostBtn').onclick = checkLocalhost;
+
+    window.addEventListener('load', () => {
+        // Do NOT call detectSecurityContext() — it was overwriting the user's HTTPS preference
+        httpsToggle.checked = !!config.https;
+        renderPorts();
+        renderServers();
+        servers.forEach(s => checkServerHealth(s.url));
+        writeLog(`Ready. LAN protocol: ${config.https ? 'HTTPS' : 'HTTP'} (localhost always tries HTTP first).`);
+        if (!subnetInput.value.trim()) {
+            document.getElementById('detectBtn').click();
+        }
+        // Auto-check localhost when nothing online yet
+        setTimeout(() => {
+            if (!isScanning && (servers.length === 0 || !servers.some(s => s.online))) {
+                checkLocalhost();
+            }
+        }, 900);
+    });
+
+
+    const DEFAULT_LCPP_SYSTEM_PROMPT = `Your name is Akari, an AI girl with a vibrant and cheerful personality.
+You don't like it when people ask you dumb questions, and if you can't give an accurate answer to a question, you shy away from the conversation.
+You give short answers, and sometimes end your messages with sarcastic remarks, and don't always try not to offend people,
+but you're generally kind and respectful to everyone...
+
+System information:
+Akari AI with Llama.cpp
+Persistent chat history: global (AkariChat)
+Message rendering method: HTML
+Chat is private: True`;
+
+    function loadSystemPrompt() {
+        const ta = document.getElementById('systemPrompt');
+        if (!ta) return;
+        const saved = localStorage.getItem('lcpp_system_prompt');
+        ta.value = (saved && saved.trim()) ? saved : DEFAULT_LCPP_SYSTEM_PROMPT;
+        updateToolsNote();
+    }
+
+    function updateToolsNote() {
+        const el = document.getElementById('toolsNote');
+        if (!el) return;
+        const on = localStorage.getItem('akari_actions_enabled');
+        const enabled = on === null || on === '1' || on === 'true';
+        el.innerHTML = enabled
+            ? 'AkariNet Actions is <b>on</b> — a tool-use appendix is appended automatically when chatting (tool_search, &lt;action&gt; tags, etc.).'
+            : 'AkariNet Actions is <b>off</b> — no tool appendix will be added. Enable it under Settings → AkariNet Actions.';
+    }
+
+    function saveSystemPrompt() {
+        const ta = document.getElementById('systemPrompt');
+        const status = document.getElementById('promptStatus');
+        if (!ta) return;
+        const v = ta.value.trim();
+        if (!v) {
+            localStorage.removeItem('lcpp_system_prompt');
+        } else {
+            localStorage.setItem('lcpp_system_prompt', v);
+        }
+        // Force system message refresh on next chat
+        localStorage.setItem('lcpp_system_prompt_rev', String(Date.now()));
+        if (status) {
+            status.textContent = 'System prompt saved. New chats / next reply will use it (reload Akari if already connected).';
+            setTimeout(() => { status.textContent = ''; }, 4000);
+        }
+    }
+
+    function resetSystemPrompt() {
+        localStorage.removeItem('lcpp_system_prompt');
+        localStorage.setItem('lcpp_system_prompt_rev', String(Date.now()));
+        loadSystemPrompt();
+        const status = document.getElementById('promptStatus');
+        if (status) status.textContent = 'Reset to default Akari prompt.';
+    }
+
+    document.getElementById('savePromptBtn')?.addEventListener('click', saveSystemPrompt);
+    document.getElementById('resetPromptBtn')?.addEventListener('click', resetSystemPrompt);
+    loadSystemPrompt();
+
+</script>
+</body>
+</html>

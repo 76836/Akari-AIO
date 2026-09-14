@@ -1,0 +1,132 @@
+.typingnotifier {
+    padding: 5px 10px;
+    border-radius: 20px;
+    background-color: transparent;
+    background-image: linear-gradient(to right, #005050, transparent);
+    color: crimson;
+    font-weight: bold;
+    background-repeat: repeat-x;
+    background-size: auto 100%;
+    text-align: left;
+    line-height: 30px;
+    font-size: x-large;
+    position: fixed;
+    bottom: 54px;
+    left: 7px;
+    width: 45vw;
+    border: 0;
+    overflow: hidden;
+}
+
+.responsetxt {
+    display: inline-block;
+    padding: 10px 15px;
+    border-radius: 0px 20px 20px 20px;
+    background-color: transparent;
+    background-image: linear-gradient(to right, rgba(255, 55, 55, 0.5), rgba(77, 255, 255, 0.4), rgba(128, 0, 128, 0.3), rgba(9, 9, 9, 0.2));
+    background-repeat: repeat-x;
+    background-size: auto 100%;
+    text-align: center;
+    line-height: 30px;
+    font-size: large;
+    border: 2px solid black;
+    margin-right: 150px;
+    width: 80vw;
+    z-index: 2;
+}
+
+.command {
+    padding: 10px 15px;
+    border-radius: 20px 20px 0px 20px;
+    background-color: #111;
+    background-repeat: repeat-x;
+    background-size: auto 100%;
+    text-align: center;
+    line-height: 30px;
+    font-size: large;
+    float: right;
+    border: 2px solid black;
+    margin-left: 150px;
+    width: 80vw;
+    z-index: 2;
+}
+
+.box {
+    padding: 5px 10px;
+    border-radius: 20px;
+    background-color: transparent;
+    background-image: linear-gradient(to right, #111111, #003333, transparent);
+    color: white;
+    background-repeat: repeat-x;
+    background-size: auto 100%;
+    text-align: left;
+    line-height: 30px;
+    font-size: x-large;
+    position: fixed;
+    bottom: 7px;
+    left: 7px;
+    width: calc(100% - 140px);
+    border: 0;
+    border: 2px solid black;
+    z-index: 21;
+}
+
+.button-menu {
+    padding: 5px 10px;
+    border-radius: 20px;
+    background-color: #111111;
+    color: red;
+    background-repeat: repeat-x;
+    background-size: auto 100%;
+    text-align: center;
+    line-height: 30px;
+    font-size: large;
+    position: fixed;
+    top: 7px;
+    right: 7px;
+    width: 50px;
+    border: 0;
+    overflow: hidden;
+    border: 2px solid black;
+    z-index: 21;
+}
+
+.mic-on {
+    padding: 5px 10px;
+    border-radius: 20px;
+    background-color: red;
+    color: white;
+    background-repeat: repeat-x;
+    background-size: auto 100%;
+    text-align: center;
+    line-height: 60px;
+    font-size: x-large;
+    position: fixed;
+    bottom: 7px;
+    left: 7px;
+    width: calc(100vw - 14px);
+    border: 0;
+    overflow: hidden;
+    border: 2px solid black;
+    z-index: 22;
+}
+
+.button-long {
+    padding: 5px 10px;
+    border-radius: 20px;
+    background-color: #111111;
+    color: cyan;
+    background-repeat: repeat-x;
+    background-size: auto 100%;
+    text-align: center;
+    line-height: 30px;
+    font-size: x-large;
+    position: fixed;
+    bottom: 7px;
+    right: 7px;
+    width: 100px;
+    border: 0;
+    overflow: hidden;
+    border: 2px solid black;
+    z-index: 21;
+}
