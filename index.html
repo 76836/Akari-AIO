@@ -24,7 +24,9 @@
             selectedBKGURL: '',
             ac41_srProvider: 'vosk',
             ac41_voskModelUrl: './models/vosk/vosk-model-small-en-us-0.15.tar.gz',
-            ac41_owwUrl: './engine/models/v2_hey_A_kar_e.onnx'
+            ac41_owwUrl: './engine/models/v2_hey_A_kar_e.onnx',
+            'akari:skipLoadingScreen': 'true',
+            ac41_ttsGreeting: 'true'
         };
         // Always apply AIO offline defaults (overrides stale main-AkariNet localStorage)
         Object.keys(d).forEach(function (k) { localStorage.setItem(k, d[k]); });

@@ -21,7 +21,7 @@ loadscreen("(5th revision) Loading Akari's VRM...");
 
   var thehtml = `
   <style>.avatariframe { width:100%; height:100%; position:fixed; left:0; top:0; z-index:1; border:0; background:transparent !important; background-color:transparent !important; color-scheme:normal; }</style>
-  <iframe src="${root}engine/AkariNet-VRM-v2.html?modelUrl=./characters/akari/VRM/Akari-optimized.vrm&debug=false" class="avatariframe" allowtransparency="true" style="background:transparent;background-color:transparent;"></iframe>
+  <iframe src="${root}engine/AkariNet-VRM-v2.html?modelUrl=/characters/akari/VRM/Akari-optimized.vrm&debug=false" class="avatariframe" allowtransparency="true" style="background:transparent;background-color:transparent;"></iframe>
   `;
   if (document.getElementById('avatar')) document.getElementById('avatar').innerHTML = thehtml;
 

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>emotionEngine Test</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #eee;
+      padding: 20px;
+    }
+    textarea {
+      width: 100%;
+      height: 120px;
+      font-size: 16px;
+      background: #1c1c1c;
+      color: #fff;
+      border: 1px solid #333;
+      padding: 10px;
+    }
+    button {
+      margin-top: 10px;
+      padding: 8px 16px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    pre {
+      background: #1c1c1c;
+      padding: 10px;
+      margin-top: 15px;
+      border: 1px solid #333;
+    }
+  </style>
+</head>
+<body>
+
+<h2>emotionEngine Test</h2>
+
+<textarea id="input">That sucks.</textarea>
+<br>
+<button id="run">Analyze</button>
+
+<pre id="output"></pre>
+
+<script type="module">
+  import analyzeEmotion from "./engine.js";
+
+  const input = document.getElementById("input");
+  const output = document.getElementById("output");
+  const run = document.getElementById("run");
+
+run.onclick = () => {
+    const result = analyzeEmotion(input.value);
+    output.textContent =
+      `Emotion: ${result.dominant}\nConfidence: ${result.confidence}`;
+};
+
+</script>
+
+</body>
+</html>
