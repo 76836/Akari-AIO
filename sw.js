@@ -512,6 +512,11 @@ self.addEventListener('fetch', (event) => {
         return fetch(event.request);
       }
 
+      // Localhost / 127.0.0.1 / file: — already on device, skip SW caching entirely
+      if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.protocol === 'file:') {
+        return fetch(event.request);
+      }
+
       // Recovery page — always synthesised, never goes to network or cache
       if (url.origin === self.location.origin && url.pathname.startsWith('/Akari/recovery')) {
         return new Response(RECOVERY_HTML, { headers: { 'Content-Type': 'text/html' } });
