@@ -31,7 +31,7 @@ export {
 
 export { default, AkarinetVoice } from './audioConsole-4.1.0.js';
 
-import { AudioBus, WhisperCppProvider, AkarinetVoice } from './audioConsole-4.1.0.js';
+import { AudioBus, BusVAD, WhisperCppProvider, AkarinetVoice } from './audioConsole-4.1.0.js';
 
 /** Worklet that emits fixed 1280-sample @ targetRate chunks, resampling if needed. */
 const FIXED_BUS_WORKLET_CODE = `
@@ -412,3 +412,154 @@ AkarinetVoice.prototype.cancelProcessing = function cancelProcessing() {
     this._log && this._log('INFO', 'cancelProcessing() — listen/ASR state cleared.');
 };
 
+
+
+// ═══════════════════════════════════════════════════════════════════
+// Firefox / Linux fix: TypeError "Error in input stream" (onnxruntime)
+//
+// Cause: BusVAD.feedChunk fired overlapping session.run() calls while
+// sharing LSTM state tensors. ORT WASM on Firefox then fails the next
+// run with "Error in input stream".
+//
+// Fix: serialize VAD inference, copy each chunk, force ORT numThreads=1.
+// ═══════════════════════════════════════════════════════════════════
+
+function _ac411_configureOrt(ort) {
+    if (!ort || !ort.env || !ort.env.wasm) return;
+    try {
+        ort.env.wasm.numThreads = 1;
+        if (typeof ort.env.wasm.proxy === 'boolean') ort.env.wasm.proxy = false;
+    } catch (_) {}
+}
+
+if (typeof BusVAD !== 'undefined' && BusVAD.prototype) {
+    const _busVadInit = BusVAD.prototype.init;
+    BusVAD.prototype.init = async function () {
+        if (this.config && this.config.ort) _ac411_configureOrt(this.config.ort);
+        return _busVadInit.apply(this, arguments);
+    };
+
+    BusVAD.prototype.feedChunk = function (chunk) {
+        if (!chunk || !chunk.length) return;
+        const copy = chunk instanceof Float32Array
+            ? new Float32Array(chunk)
+            : new Float32Array(chunk);
+
+        this._vadQueue = (this._vadQueue || Promise.resolve())
+            .then(() => this._runVadSerialized(copy))
+            .catch((err) => {
+                try { this._emitter.emit('error', err); } catch (_) {}
+            });
+    };
+
+    BusVAD.prototype._runVadSerialized = async function (chunk) {
+        let triggered = false;
+        try {
+            triggered = await this._runVad(chunk);
+        } catch (err) {
+            try { this._emitter.emit('error', err); } catch (_) {}
+            return;
+        }
+
+        if (triggered) {
+            if (!this._isSpeech) {
+                this._isSpeech = true;
+                this._speechBuffer = [];
+                this._emitter.emit('speech-start');
+            }
+            this._redemptionCount = this._redemptionFrames;
+            this._speechBuffer.push(chunk);
+        } else if (this._isSpeech) {
+            this._redemptionCount--;
+            this._speechBuffer.push(chunk);
+            if (this._redemptionCount <= 0) {
+                this._isSpeech = false;
+                const total = this._speechBuffer.reduce((s, a) => s + a.length, 0);
+                const audio = new Float32Array(total);
+                let off = 0;
+                for (const c of this._speechBuffer) { audio.set(c, off); off += c.length; }
+                this._speechBuffer = [];
+                if (audio.length < 2000) {
+                    this._emitter.emit('misfire', { audio });
+                } else {
+                    this._emitter.emit('speech-end', { audio });
+                }
+            }
+        }
+    };
+}
+
+// Safer mic constraints on Linux (fallback to audio:true if rejected).
+(function patchBusStartConstraints() {
+    const prev = AudioBus.prototype.start;
+    AudioBus.prototype.start = async function () {
+        if (this._active) return;
+        // Temporarily use friendlier constraints via a one-shot config deviceId path
+        const originalDeviceId = this.config.deviceId;
+        const tryStart = async (constraints) => {
+            this._mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        };
+        try {
+            await tryStart({
+                audio: {
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    ...(originalDeviceId ? { deviceId: { exact: originalDeviceId } } : {})
+                }
+            });
+        } catch (_) {
+            await tryStart({
+                audio: originalDeviceId ? { deviceId: { exact: originalDeviceId } } : true
+            });
+        }
+        // Hand off to the rest of the Firefox-safe start (context + worklet)
+        // by inlining the remainder of the previous implementation:
+        this._audioContext = new AudioContext();
+        if (this._audioContext.state === 'suspended') {
+            try { await this._audioContext.resume(); } catch (_) {}
+        }
+        const source = this._audioContext.createMediaStreamSource(this._mediaStream);
+        this._sourceNode = source;
+        this._gainNode = this._audioContext.createGain();
+        this._gainNode.gain.value = this.config.gain;
+
+        const blob = new Blob([FIXED_BUS_WORKLET_CODE], { type: 'application/javascript' });
+        const workletURL = URL.createObjectURL(blob);
+        await this._audioContext.audioWorklet.addModule(workletURL);
+        URL.revokeObjectURL(workletURL);
+
+        this._workletNode = new AudioWorkletNode(this._audioContext, 'audio-bus-processor', {
+            processorOptions: { targetSampleRate: this.config.sampleRate || 16000 }
+        });
+        this._workletNode.port.onmessage = (event) => {
+            const chunk = event.data;
+            if (!chunk) return;
+            this.liveRing.push(chunk);
+            for (const fn of this._subscribers) {
+                try { fn(chunk); } catch (err) { console.error('[AudioBus] subscriber error:', err); }
+            }
+        };
+        source.connect(this._gainNode);
+        this._gainNode.connect(this._workletNode);
+        const muteGain = this._audioContext.createGain();
+        muteGain.gain.value = 0;
+        this._workletNode.connect(muteGain);
+        muteGain.connect(this._audioContext.destination);
+        this._active = true;
+        if (this.debug) {
+            console.log('[AudioBus] Started (Firefox-safe, serialized VAD path).',
+                this._audioContext.sampleRate, '→', this.config.sampleRate);
+        }
+    };
+})();
+
+const _voiceInit = AkarinetVoice.prototype.init;
+AkarinetVoice.prototype.init = async function () {
+    const ret = await _voiceInit.apply(this, arguments);
+    try {
+        if (typeof window !== 'undefined' && window.ort) _ac411_configureOrt(window.ort);
+    } catch (_) {}
+    return ret;
+};
