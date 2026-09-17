@@ -414,8 +414,72 @@ AkarinetVoice.prototype._createSpeechProvider = function _createSpeechProvider42
     return _createSpeechProvider412.call(this);
 };
 
+/**
+ * RMS energy VAD — no onnxruntime. Used for Vosk on Firefox/Linux where
+ * concurrent Silero BusVAD + OpenWakeWord ORT sessions throw
+ * "TypeError: Error in input stream".
+ * Mutates an existing BusVAD instance in-place so bus subscribers keep working.
+ */
+function installEnergyVad(vad, opts) {
+    if (!vad) return;
+    const threshold = (opts && opts.threshold) != null ? opts.threshold : 0.012;
+    const redemptionMs = (opts && opts.redemptionMs) != null ? opts.redemptionMs : 1600;
+    const chunkMs = 80; // 1280 samples @ 16 kHz
+    vad._energyThreshold = threshold;
+    vad._redemptionFrames = Math.max(1, Math.ceil(redemptionMs / chunkMs));
+    vad._session = null; // drop Silero session — never call ORT again
+    vad._h = null;
+    vad._c = null;
+    vad._runVad = async function energyRunVad(chunk) {
+        if (!chunk || !chunk.length) return false;
+        let sum = 0;
+        for (let i = 0; i < chunk.length; i++) {
+            const s = chunk[i];
+            sum += s * s;
+        }
+        const rms = Math.sqrt(sum / chunk.length);
+        return rms >= this._energyThreshold;
+    };
+    // Ensure feed path is serialized even if 4.1.1 patch order differs
+    if (typeof vad._runVadSerialized !== 'function') {
+        vad.feedChunk = function (chunk) {
+            if (!chunk || !chunk.length) return;
+            const copy = chunk instanceof Float32Array ? new Float32Array(chunk) : new Float32Array(chunk);
+            this._vadQueue = (this._vadQueue || Promise.resolve())
+                .then(async () => {
+                    let triggered = false;
+                    try { triggered = await this._runVad(copy); } catch (_) { return; }
+                    if (triggered) {
+                        if (!this._isSpeech) {
+                            this._isSpeech = true;
+                            this._speechBuffer = [];
+                            this._emitter.emit('speech-start');
+                        }
+                        this._redemptionCount = this._redemptionFrames;
+                        this._speechBuffer.push(copy);
+                    } else if (this._isSpeech) {
+                        this._redemptionCount--;
+                        this._speechBuffer.push(copy);
+                        if (this._redemptionCount <= 0) {
+                            this._isSpeech = false;
+                            const total = this._speechBuffer.reduce((s, a) => s + a.length, 0);
+                            const audio = new Float32Array(total);
+                            let off = 0;
+                            for (const c of this._speechBuffer) { audio.set(c, off); off += c.length; }
+                            this._speechBuffer = [];
+                            if (audio.length < 2000) this._emitter.emit('misfire', { audio });
+                            else this._emitter.emit('speech-end', { audio });
+                        }
+                    }
+                })
+                .catch(() => {});
+        };
+    }
+}
+
 AkarinetVoice.prototype.init = async function init421() {
     const wantVosk = this.config.speechRecognitionProvider === 'vosk' || this.config._wantVosk;
+    const isFirefox = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent || '');
     if (wantVosk) {
         // 4.1.0 enables Bus+VAD only for transformers/whispercpp; borrow that path for Vosk.
         this.config._wantVosk = true;
@@ -424,7 +488,6 @@ AkarinetVoice.prototype.init = async function init421() {
     try {
         await _init412.call(this);
     } catch (err) {
-        // Firefox sometimes throws "Error in input stream" during mic/VAD setup; surface clearly.
         const msg = (err && err.message) ? err.message : String(err);
         this._log && this._log('ERROR', 'Audio init failed: ' + msg);
         throw err;
@@ -433,6 +496,18 @@ AkarinetVoice.prototype.init = async function init421() {
             this.config.speechRecognitionProvider = 'vosk';
             this._log && this._log('INFO', 'Speech recognition provider: vosk (restored after bus init)');
         }
+    }
+
+    // Vosk (and Firefox): replace Silero BusVAD with energy VAD so ORT is only
+    // used by OpenWakeWord — eliminates dual-session "Error in input stream".
+    if (this.busVad && (wantVosk || isFirefox)) {
+        installEnergyVad(this.busVad, {
+            threshold: typeof this.config.vadThreshold === 'number' && this.config.vadThreshold < 1
+                ? Math.max(0.008, this.config.vadThreshold * 0.03) // map 0-1 silero-ish → rms ballpark
+                : 0.012,
+            redemptionMs: this.config.vadRedemptionMs || 1600
+        });
+        this._log && this._log('INFO', 'BusVAD: energy/RMS mode (no Silero ORT) — Firefox-safe');
     }
 
     // Progressive Vosk wiring (only when the provider exposes the hooks)
@@ -446,8 +521,6 @@ AkarinetVoice.prototype.init = async function init421() {
         if (this.busVad) {
             this.busVad.on('speech-start', () => {
                 if (typeof this.srProvider.startStreaming === 'function') {
-                    // Only stream after wake when requireWakeSound is enabled.
-                    // Also respect adapter ASR gate (chime/greeting window).
                     const requireWake = !!this.config.requireWakeSound;
                     const hasWake = !!this.wakeSoundDetectedTime;
                     const gated = typeof window !== 'undefined' && !!window.__ac41AsrBlocked;
@@ -456,8 +529,6 @@ AkarinetVoice.prototype.init = async function init421() {
                     }
                 }
             });
-            // speech-end already goes to _handleSpeech → transcribe().
-            // Stop live feed so any trailing chunks after endpoint are ignored.
             this.busVad.on('speech-end', () => {
                 if (typeof this.srProvider.stopStreaming === 'function') {
                     try { this.srProvider.stopStreaming(); } catch (_) {}

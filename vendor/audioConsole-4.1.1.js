@@ -31,7 +31,26 @@ export {
 
 export { default, AkarinetVoice } from './audioConsole-4.1.0.js';
 
-import { AudioBus, BusVAD, WhisperCppProvider, AkarinetVoice } from './audioConsole-4.1.0.js';
+import { AudioBus, BusVAD, OpenWakeWordProvider, WhisperCppProvider, AkarinetVoice } from './audioConsole-4.1.0.js';
+
+// Pin ORT to single-thread WASM as soon as it appears (before sessions are created).
+(function pinOrtWhenReady() {
+    if (typeof window === 'undefined') return;
+    const pin = () => {
+        try {
+            if (window.ort && window.ort.env && window.ort.env.wasm) {
+                window.ort.env.wasm.numThreads = 1;
+                if (typeof window.ort.env.wasm.proxy === 'boolean') window.ort.env.wasm.proxy = false;
+                return true;
+            }
+        } catch (_) {}
+        return false;
+    };
+    if (pin()) return;
+    const iv = setInterval(() => { if (pin()) clearInterval(iv); }, 25);
+    setTimeout(() => clearInterval(iv), 60000);
+})();
+
 
 /** Worklet that emits fixed 1280-sample @ targetRate chunks, resampling if needed. */
 const FIXED_BUS_WORKLET_CODE = `
@@ -563,3 +582,62 @@ AkarinetVoice.prototype.init = async function () {
     } catch (_) {}
     return ret;
 };
+
+
+// Swallow ORT "Error in input stream" so OpenWakeWord doesn't spam / break the bus.
+(function patchOrtInputStreamSwallow() {
+    function isInputStreamErr(err) {
+        const m = (err && (err.message || err)) ? String(err.message || err) : '';
+        return /input stream/i.test(m);
+    }
+    if (typeof BusVAD !== 'undefined' && BusVAD.prototype && BusVAD.prototype._runVad) {
+        const orig = BusVAD.prototype._runVad;
+        BusVAD.prototype._runVad = async function (chunk) {
+            try {
+                return await orig.call(this, chunk);
+            } catch (err) {
+                if (isInputStreamErr(err)) return false;
+                throw err;
+            }
+        };
+    }
+    if (typeof OpenWakeWordProvider !== 'undefined' && OpenWakeWordProvider.prototype) {
+        const origFeed = OpenWakeWordProvider.prototype.feedChunk;
+        OpenWakeWordProvider.prototype.feedChunk = function (chunk) {
+            try {
+                const ret = origFeed.call(this, chunk);
+                // If engine uses a promise queue, also silence emitted errors
+                if (this._engine && !this._engine.__inputStreamPatched) {
+                    this._engine.__inputStreamPatched = true;
+                    const eng = this._engine;
+                    const origProcess = eng._processChunk && eng._processChunk.bind(eng);
+                    if (origProcess) {
+                        eng._processChunk = async function (chunk, opts) {
+                            try {
+                                return await origProcess(chunk, opts);
+                            } catch (err) {
+                                if (isInputStreamErr(err)) return;
+                                throw err;
+                            }
+                        };
+                    }
+                    const origVad = eng._runVad && eng._runVad.bind(eng);
+                    if (origVad) {
+                        eng._runVad = async function (chunk) {
+                            try {
+                                return await origVad(chunk);
+                            } catch (err) {
+                                if (isInputStreamErr(err)) return false;
+                                throw err;
+                            }
+                        };
+                    }
+                }
+                return ret;
+            } catch (err) {
+                if (isInputStreamErr(err)) return;
+                throw err;
+            }
+        };
+    }
+})();
