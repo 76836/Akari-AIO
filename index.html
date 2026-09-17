@@ -564,30 +564,8 @@
     };
 
     async function initAkariAutomata() {
-        return; // Akari-AIO: Automata disabled (no ATPK packages)
-        if (typeof AutomatonLoader === 'undefined') return;
-        const loader = new AutomatonLoader();
-        window.automatonLoader = loader;
-        const defaultUrl = 'https://76836.github.io/AkariNet-Automata/demo.atpk';
-        const actionsUrl = new URL('./engine/akari-actions.atpk', window.location.href).href;
-        let urls = [], blacklist = [];
-        try { urls = JSON.parse(localStorage.getItem('akari:automata_urls') || '[]'); if (!Array.isArray(urls)) urls = []; } catch { urls = []; }
-        try { blacklist = JSON.parse(localStorage.getItem('akari:automata_blacklist') || '[]'); if (!Array.isArray(blacklist)) blacklist = []; } catch { blacklist = []; }
-        if (urls.length === 0) { urls = [defaultUrl]; }
-        // Pre-install AkariNet Actions (enabled by default; user can blacklist in Automata Manager)
-        if (!urls.includes(actionsUrl) && !urls.some(u => String(u).includes('akari-actions.atpk'))) {
-            urls = [actionsUrl].concat(urls);
-        }
-        localStorage.setItem('akari:automata_urls', JSON.stringify(urls));
-        // Default Actions settings if unset
-        if (localStorage.getItem('akari_actions_enabled') === null) localStorage.setItem('akari_actions_enabled', '1');
-        if (localStorage.getItem('akari_actions_mode') === null) localStorage.setItem('akari_actions_mode', 'general');
-        if (localStorage.getItem('akari_actions_max_turns') === null) localStorage.setItem('akari_actions_max_turns', '5');
-        loader.setAutomataUrls(urls);
-        loader.setBlacklist(blacklist);
-        if (window.AkariAutopilot) AkariAutopilot.beginDownload('Loading Automata…');
-        await loader.loadAll();
-        if (window.AkariAutopilot) AkariAutopilot.endDownload('Automata ready');
+        // Akari-AIO: Automata disabled (no ATPK packages in this distribution)
+        return;
     }
     if (document.readyState === 'complete') initAkariAutomata();
     else window.addEventListener('load', initAkariAutomata);

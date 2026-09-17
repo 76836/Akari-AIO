@@ -47,7 +47,7 @@ import {
 } from './audioConsole-4.1.2.js';
 
 // ── Vosk loader (once) ─────────────────────────────────────────────
-const VOSK_CDN = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js';
+const VOSK_CDN = new URL('./vosk.js', import.meta.url).href;
 const DEFAULT_VOSK_MODEL =
     'https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz';
 
@@ -415,17 +415,23 @@ AkarinetVoice.prototype._createSpeechProvider = function _createSpeechProvider42
 };
 
 AkarinetVoice.prototype.init = async function init421() {
-    const wantVosk = this.config.speechRecognitionProvider === 'vosk';
+    const wantVosk = this.config.speechRecognitionProvider === 'vosk' || this.config._wantVosk;
     if (wantVosk) {
-        // Enable needsBus / needsVad / needsOrt checks inside 4.1.0 init
+        // 4.1.0 enables Bus+VAD only for transformers/whispercpp; borrow that path for Vosk.
         this.config._wantVosk = true;
         this.config.speechRecognitionProvider = 'transformers';
     }
     try {
         await _init412.call(this);
+    } catch (err) {
+        // Firefox sometimes throws "Error in input stream" during mic/VAD setup; surface clearly.
+        const msg = (err && err.message) ? err.message : String(err);
+        this._log && this._log('ERROR', 'Audio init failed: ' + msg);
+        throw err;
     } finally {
         if (wantVosk) {
             this.config.speechRecognitionProvider = 'vosk';
+            this._log && this._log('INFO', 'Speech recognition provider: vosk (restored after bus init)');
         }
     }
 

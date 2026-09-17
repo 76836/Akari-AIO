@@ -35,7 +35,7 @@
         continuedConversation: lsBool('ac41_continuedConversation', false),
         continuedMs: lsNum('ac41_continuedMs', 7000),
 
-        speechRecognitionProvider: ls('ac41_srProvider', 'vosk'),
+        speechRecognitionProvider: 'vosk', // Akari-AIO: always Vosk offline
         modelId: ls('ac41_transformersModel', 'onnx-community/moonshine-base-ONNX'),
         modelQuantization: 'q8',
         whisperCpp: ls('ac41_whisperUrl', '') ? { baseUrl: ls('ac41_whisperUrl', '') } : null,
