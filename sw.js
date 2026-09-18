@@ -1,4 +1,4 @@
-const CACHE_NAME = 'AkariOffline';
+const CACHE_NAME = 'AkariOffline-v3';
 const PREFS_CACHE = 'AkariPrefs';
 
 // These extensions are managed by the app's own caching logic.
