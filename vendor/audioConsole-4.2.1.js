@@ -43,8 +43,7 @@ export { default } from './audioConsole-4.1.2.js';
 
 import {
     SpeechRecognitionProvider,
-    AkarinetVoice,
-    BusVAD
+    AkarinetVoice
 } from './audioConsole-4.1.2.js';
 
 // ── Vosk loader (once) ─────────────────────────────────────────────
@@ -414,124 +413,22 @@ AkarinetVoice.prototype._createSpeechProvider = function _createSpeechProvider42
     return _createSpeechProvider412.call(this);
 };
 
-/**
- * RMS energy VAD — no onnxruntime. Used for Vosk / Firefox so Silero BusVAD
- * never runs session.run (avoids dual-ORT "Error in input stream").
- */
-function installEnergyVad(vad, opts) {
-    if (!vad) return;
-    const threshold = (opts && opts.threshold) != null ? opts.threshold : 0.012;
-    const redemptionMs = (opts && opts.redemptionMs) != null ? opts.redemptionMs : 1600;
-    const chunkMs = 80;
-    vad._energyThreshold = threshold;
-    vad._redemptionFrames = Math.max(1, Math.ceil(redemptionMs / chunkMs));
-    vad._session = null;
-    vad._h = null;
-    vad._c = null;
-    vad._runVad = async function energyRunVad(chunk) {
-        if (!chunk || !chunk.length) return false;
-        let sum = 0;
-        for (let i = 0; i < chunk.length; i++) {
-            const s = chunk[i];
-            sum += s * s;
-        }
-        return Math.sqrt(sum / chunk.length) >= this._energyThreshold;
-    };
-    vad.feedChunk = function (chunk) {
-        if (!chunk || !chunk.length) return;
-        const copy = chunk instanceof Float32Array ? new Float32Array(chunk) : new Float32Array(chunk);
-        this._vadQueue = (this._vadQueue || Promise.resolve())
-            .then(async () => {
-                let triggered = false;
-                try { triggered = await this._runVad(copy); } catch (_) { return; }
-                if (triggered) {
-                    if (!this._isSpeech) {
-                        this._isSpeech = true;
-                        this._speechBuffer = [];
-                        this._emitter.emit('speech-start');
-                    }
-                    this._redemptionCount = this._redemptionFrames;
-                    this._speechBuffer.push(copy);
-                } else if (this._isSpeech) {
-                    this._redemptionCount--;
-                    this._speechBuffer.push(copy);
-                    if (this._redemptionCount <= 0) {
-                        this._isSpeech = false;
-                        const total = this._speechBuffer.reduce((s, a) => s + a.length, 0);
-                        const audio = new Float32Array(total);
-                        let off = 0;
-                        for (const c of this._speechBuffer) { audio.set(c, off); off += c.length; }
-                        this._speechBuffer = [];
-                        if (audio.length < 2000) this._emitter.emit('misfire', { audio });
-                        else this._emitter.emit('speech-end', { audio });
-                    }
-                }
-            })
-            .catch(() => {});
-    };
-}
-
-/** Skip Silero model load entirely — init becomes a no-op then energy is installed. */
-function patchBusVadInitSkipSilero() {
-    if (typeof BusVAD === 'undefined' || !BusVAD.prototype) return () => {};
-    const orig = BusVAD.prototype.init;
-    BusVAD.prototype.init = async function () {
-        this._session = null;
-        this._h = null;
-        this._c = null;
-        // No ORT, no network model fetch
-        return;
-    };
-    return () => { BusVAD.prototype.init = orig; };
-}
-
 AkarinetVoice.prototype.init = async function init421() {
     const wantVosk = this.config.speechRecognitionProvider === 'vosk' || this.config._wantVosk;
-    const isFirefox = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent || '');
-    let restoreVadInit = () => {};
-
     if (wantVosk) {
+        // 4.1.0 enables Bus+VAD only for transformers/whispercpp; borrow that path for Vosk.
         this.config._wantVosk = true;
-        this.config.speechRecognitionProvider = 'transformers'; // enable bus path in 4.1.0
-        // Never download / run Silero for Vosk
-        restoreVadInit = patchBusVadInitSkipSilero();
+        this.config.speechRecognitionProvider = 'transformers';
     }
-
     try {
         await _init412.call(this);
-    } catch (err) {
-        const msg = (err && err.message) ? err.message : String(err);
-        this._log && this._log('ERROR', 'Audio init failed: ' + msg);
-        throw err;
     } finally {
-        restoreVadInit();
         if (wantVosk) {
             this.config.speechRecognitionProvider = 'vosk';
-            this._log && this._log('INFO', 'Speech recognition provider: vosk');
         }
     }
 
-    // Energy VAD on the BusVAD instance (subscribers already point here)
-    if (this.busVad && (wantVosk || isFirefox)) {
-        installEnergyVad(this.busVad, {
-            threshold: 0.012,
-            redemptionMs: this.config.vadRedemptionMs || 1600
-        });
-        this._log && this._log('INFO', 'BusVAD: energy/RMS mode (no Silero ORT) — Firefox-safe');
-    }
-
-    // Firefox: OpenWakeWord ORT still throws "Error in input stream" on the bus.
-    // Detach it; user can press the mic button (manual arm still works).
-    if (isFirefox && this.wakeWordProvider && typeof this.wakeWordProvider.feedChunk === 'function') {
-        this.wakeWordProvider.feedChunk = function () { /* disabled on Firefox — ORT input stream */ };
-        this.config.requireWakeSound = false;
-        this._log && this._log(
-            'INFO',
-            'Firefox: OpenWakeWord bus feed disabled (ORT). Use the mic button to talk.'
-        );
-    }
-
-    // Progressive Vosk wiring
+    // Progressive Vosk wiring (only when the provider exposes the hooks)
     if (this.srProvider && typeof this.srProvider.feedChunk === 'function') {
         if (this.bus) {
             this.bus.addSubscriber(chunk => {
