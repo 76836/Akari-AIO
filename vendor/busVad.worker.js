@@ -1,10 +1,9 @@
 /**
  * BusVAD worker — isolated ORT for Silero only.
- * Messages: init | chunk | reset | destroy
- * Replies: ready | result | error
+ * Do NOT declare `let ort` / `var ort` here: ort.*.js also binds `ort` via importScripts.
  */
 let session = null;
-let ort = null;
+let ortApi = null; // local handle only — never named `ort`
 let h = null;
 let c = null;
 let sampleRate = 16000;
@@ -15,17 +14,19 @@ function post(msg) {
 }
 
 function loadOrt(scriptUrl) {
+  // Clears any previous binding only if we control it; importScripts sets global ort.
   importScripts(scriptUrl);
-  ort = self.ort;
-  if (!ort || !ort.InferenceSession) throw new Error('ort missing after importScripts: ' + scriptUrl);
+  ortApi = self.ort;
+  if (!ortApi || !ortApi.InferenceSession) {
+    throw new Error('ort missing after importScripts: ' + scriptUrl);
+  }
   try {
-    if (ort.env && ort.env.wasm) {
-      ort.env.wasm.numThreads = 1;
-      if (typeof ort.env.wasm.proxy === 'boolean') ort.env.wasm.proxy = false;
+    if (ortApi.env && ortApi.env.wasm) {
+      ortApi.env.wasm.numThreads = 1;
+      if (typeof ortApi.env.wasm.proxy === 'boolean') ortApi.env.wasm.proxy = false;
       try {
         const u = new URL(scriptUrl, self.location.href);
-        const dir = u.href.replace(/[^/]+$/, '');
-        ort.env.wasm.wasmPaths = dir;
+        ortApi.env.wasm.wasmPaths = u.href.replace(/[^/]+$/, '');
       } catch (_) {}
     }
   } catch (_) {}
@@ -40,6 +41,7 @@ async function init(msg) {
   candidates.push('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js');
 
   let lastErr = null;
+  ortApi = null;
   for (const url of candidates) {
     try {
       loadOrt(url);
@@ -47,23 +49,23 @@ async function init(msg) {
       break;
     } catch (e) {
       lastErr = e;
-      ort = null;
+      ortApi = null;
     }
   }
-  if (!ort) throw lastErr || new Error('could not load ort in VAD worker');
+  if (!ortApi) throw lastErr || new Error('could not load ort in VAD worker');
 
   const modelUrl = msg.modelUrl;
   if (!modelUrl) throw new Error('modelUrl required');
-  session = await ort.InferenceSession.create(modelUrl, { executionProviders: ['wasm'] });
-  h = new ort.Tensor('float32', new Float32Array(128).fill(0), [2, 1, 64]);
-  c = new ort.Tensor('float32', new Float32Array(128).fill(0), [2, 1, 64]);
+  session = await ortApi.InferenceSession.create(modelUrl, { executionProviders: ['wasm'] });
+  h = new ortApi.Tensor('float32', new Float32Array(128).fill(0), [2, 1, 64]);
+  c = new ortApi.Tensor('float32', new Float32Array(128).fill(0), [2, 1, 64]);
   post({ type: 'ready' });
 }
 
 async function runOne(float32) {
   const data = float32 instanceof Float32Array ? new Float32Array(float32) : new Float32Array(float32);
-  const tensor = new ort.Tensor('float32', data, [1, data.length]);
-  const sr = new ort.Tensor('int64', [BigInt(sampleRate)], []);
+  const tensor = new ortApi.Tensor('float32', data, [1, data.length]);
+  const sr = new ortApi.Tensor('int64', [BigInt(sampleRate)], []);
   const res = await session.run({ input: tensor, sr, h, c });
   h = res.hn;
   c = res.cn;
@@ -82,7 +84,6 @@ async function runChunk(id, buffer) {
   }
   let confidence = 0;
   try {
-    // Try full chunk first (OWW silero export often expects 1280)
     confidence = await runOne(samples);
   } catch (_) {
     try {
@@ -112,7 +113,9 @@ self.onmessage = async (ev) => {
       if (h && h.data) h.data.fill(0);
       if (c && c.data) c.data.fill(0);
     } else if (msg.type === 'destroy') {
-      session = null; h = null; c = null;
+      session = null;
+      h = null;
+      c = null;
     }
   } catch (err) {
     post({ type: 'error', message: String(err && err.message || err) });
