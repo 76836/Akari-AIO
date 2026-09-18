@@ -35,10 +35,11 @@ function loadOrt(scriptUrl) {
 async function init(msg) {
   sampleRate = msg.sampleRate || 16000;
   threshold = msg.threshold != null ? msg.threshold : 0.5;
+  // CDN first: ships matching wasm; local piper ort often missing sibling wasm files → broken session.
   const candidates = [];
-  if (msg.ortScriptUrl) candidates.push(msg.ortScriptUrl);
-  if (msg.ortScriptUrlFallback) candidates.push(msg.ortScriptUrlFallback);
   candidates.push('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js');
+  if (msg.ortScriptUrlFallback) candidates.push(msg.ortScriptUrlFallback);
+  if (msg.ortScriptUrl) candidates.push(msg.ortScriptUrl);
 
   let lastErr = null;
   ortApi = null;

@@ -211,30 +211,6 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
 /**
  * BusVAD → dedicated worker with its own ORT instance (isolated from OpenWakeWord).
  */
-
-/**
- * onnxruntime-web (wasm) cannot run concurrent session.run() on one runtime.
- * BusVAD (main-thread fallback) + OpenWakeWord both ran every chunk in parallel →
- * "Session mismatch" / "Session already started".
- */
-const _ac411OrtGate = { p: Promise.resolve() };
-function _ac411WithOrtLock(fn) {
-    const run = _ac411OrtGate.p.then(() => fn(), () => fn());
-    _ac411OrtGate.p = run.then(() => {}, () => {});
-    return run;
-}
-
-if (typeof OpenWakeWordProvider !== 'undefined' && OpenWakeWordProvider.prototype) {
-    OpenWakeWordProvider.prototype.feedChunk = function feedChunkLocked(chunk) {
-        if (!this._engine || !this._isListening) return;
-        this._engine._processingQueue = this._engine._processingQueue
-            .then(() => _ac411WithOrtLock(() => this._engine._processChunk(chunk)))
-            .catch((err) => {
-                try { this._engine._emitter.emit('error', err); } catch (_) {}
-            });
-    };
-}
-
 (function patchBusVadWorker() {
     if (typeof BusVAD === 'undefined' || !BusVAD.prototype) return;
 
@@ -266,6 +242,20 @@ if (typeof OpenWakeWordProvider !== 'undefined' && OpenWakeWordProvider.prototyp
                 sessionOptions
             );
         }
+        // Prefer worker; main-thread fallback must share the global ORT run lock.
+        try {
+            if (session && !session.__akariRunLocked) {
+                const origRun = session.run.bind(session);
+                let chain = self.config.ort.__akariVadChain || Promise.resolve();
+                session.run = function (feeds, options) {
+                    const p = chain.then(() => origRun(feeds, options));
+                    chain = p.then(() => {}, () => {});
+                    self.config.ort.__akariVadChain = chain;
+                    return p;
+                };
+                session.__akariRunLocked = true;
+            }
+        } catch (_) {}
         self._session = session;
         self._h = new self.config.ort.Tensor('float32', new Float32Array(128).fill(0), [2, 1, 64]);
         self._c = new self.config.ort.Tensor('float32', new Float32Array(128).fill(0), [2, 1, 64]);
@@ -363,14 +353,12 @@ if (typeof OpenWakeWordProvider !== 'undefined' && OpenWakeWordProvider.prototyp
                 try {
                     const ort = this.config.ort;
                     if (!this._session || !ort) return;
-                    await _ac411WithOrtLock(async () => {
-                        const tensor = new ort.Tensor('float32', copy, [1, copy.length]);
-                        const sr = new ort.Tensor('int64', [BigInt(this.config.sampleRate || 16000)], []);
-                        const res = await this._session.run({ input: tensor, sr, h: this._h, c: this._c });
-                        this._h = res.hn;
-                        this._c = res.cn;
-                        triggered = res.output.data[0] > (this.config.threshold ?? 0.5);
-                    });
+                    const tensor = new ort.Tensor('float32', copy, [1, copy.length]);
+                    const sr = new ort.Tensor('int64', [BigInt(this.config.sampleRate || 16000)], []);
+                    const res = await this._session.run({ input: tensor, sr, h: this._h, c: this._c });
+                    this._h = res.hn;
+                    this._c = res.cn;
+                    triggered = res.output.data[0] > (this.config.threshold ?? 0.5);
                 } catch (err) {
                     try { this._emitter.emit('error', err); } catch (_) {}
                     return;
@@ -454,22 +442,57 @@ if (typeof OpenWakeWordProvider !== 'undefined' && OpenWakeWordProvider.prototyp
 })();
 
 
-// Pin main-thread ORT (OpenWakeWord) to single-thread as soon as it appears.
-(function pinMainOrt() {
-    if (typeof window === 'undefined') return;
-    const pin = () => {
+// Pin main-thread ORT + serialize ALL session.run (BusVAD + OpenWakeWord share one WASM).
+// Without this, concurrent runs throw "Session already started" / "Session mismatch".
+(function pinAndLockMainOrt() {
+    if (typeof window === 'undefined' && typeof globalThis === 'undefined') return;
+    const root = typeof window !== 'undefined' ? window : globalThis;
+    let chain = Promise.resolve();
+
+    function lockSession(session) {
+        if (!session || session.__akariRunLocked) return session;
+        const origRun = session.run.bind(session);
+        session.run = function (feeds, options) {
+            const p = chain.then(() => origRun(feeds, options));
+            // Keep chain alive even if a run fails so later runs still serialize
+            chain = p.then(() => {}, () => {});
+            return p;
+        };
+        session.__akariRunLocked = true;
+        return session;
+    }
+
+    function patchOrt(ort) {
+        if (!ort || ort.__akariPatched) return !!ort;
         try {
-            if (window.ort && window.ort.env && window.ort.env.wasm) {
-                window.ort.env.wasm.numThreads = 1;
-                if (typeof window.ort.env.wasm.proxy === 'boolean') window.ort.env.wasm.proxy = false;
-                return true;
+            if (ort.env && ort.env.wasm) {
+                ort.env.wasm.numThreads = 1;
+                if (typeof ort.env.wasm.proxy === 'boolean') ort.env.wasm.proxy = false;
             }
+        } catch (_) {}
+        try {
+            const IS = ort.InferenceSession;
+            if (IS && typeof IS.create === 'function') {
+                const origCreate = IS.create.bind(IS);
+                IS.create = async function (...args) {
+                    const session = await origCreate(...args);
+                    return lockSession(session);
+                };
+            }
+        } catch (_) {}
+        ort.__akariPatched = true;
+        return true;
+    }
+
+    const tick = () => {
+        try {
+            if (root.ort && patchOrt(root.ort)) return true;
         } catch (_) {}
         return false;
     };
-    if (pin()) return;
-    const iv = setInterval(() => { if (pin()) clearInterval(iv); }, 25);
-    setTimeout(() => clearInterval(iv), 60000);
+    if (tick()) return;
+    const iv = setInterval(() => { if (tick()) clearInterval(iv); }, 20);
+    setTimeout(() => clearInterval(iv), 120000);
 })();
 
 
