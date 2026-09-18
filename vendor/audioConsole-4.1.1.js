@@ -215,25 +215,63 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
     if (typeof BusVAD === 'undefined' || !BusVAD.prototype) return;
 
     const MIN_SPEECH_SAMPLES = 2000;
+    const _origInit = BusVAD.prototype.init;
+    const _origFeed = BusVAD.prototype.feedChunk;
+    const _origDestroy = BusVAD.prototype.destroy;
+    const _origReset = BusVAD.prototype.reset;
 
     function resolveUrl(rel) {
-        try {
-            return new URL(rel, import.meta.url).href;
-        } catch (_) {
-            return rel;
+        try { return new URL(rel, import.meta.url).href; }
+        catch (_) { return rel; }
+    }
+
+    async function mainThreadInit(self) {
+        // Original 4.1.0 Silero on the main-thread ORT (shared with OWW if needed)
+        if (typeof _origInit === 'function') {
+            // _origInit was already overwritten — call core path inline
         }
+        if (!self.config.ort) throw new Error('BusVAD: config.ort required for main-thread fallback');
+        const modelUrl = resolveUrl('../models/vad/silero_vad.onnx');
+        const sessionOptions = { executionProviders: ['wasm'] };
+        let session;
+        try {
+            session = await self.config.ort.InferenceSession.create(modelUrl, sessionOptions);
+        } catch (_) {
+            session = await self.config.ort.InferenceSession.create(
+                'https://cdn.jsdelivr.net/gh/dnavarrom/openwakeword_wasm@main/models/silero_vad.onnx',
+                sessionOptions
+            );
+        }
+        self._session = session;
+        self._h = new self.config.ort.Tensor('float32', new Float32Array(128).fill(0), [2, 1, 64]);
+        self._c = new self.config.ort.Tensor('float32', new Float32Array(128).fill(0), [2, 1, 64]);
+        self._useWorker = false;
+        if (self.debug) console.log('[BusVAD] Main-thread Silero ready. Threshold:', self.config.threshold);
     }
 
     BusVAD.prototype.init = async function initWorkerVad() {
+        this._useWorker = false;
+        this._vadWorker = null;
+        this._vadPending = new Map();
+        this._vadReqId = 0;
+        this._vadQueue = Promise.resolve();
+
         const workerUrl = resolveUrl('./busVad.worker.js');
-        // Prefer local Silero; fall back to CDN
         const modelUrl = resolveUrl('../models/vad/silero_vad.onnx');
         const ortScriptUrl = resolveUrl('../models/piper/ort.all.min.js');
 
-        this._vadWorker = new Worker(workerUrl);
-        this._vadReqId = 0;
-        this._vadPending = new Map();
-        this._vadQueue = Promise.resolve();
+        try {
+            this._vadWorker = new Worker(workerUrl);
+        } catch (e) {
+            if (this.debug) console.warn('[BusVAD] Worker construct failed, main-thread fallback:', e);
+            await mainThreadInit(this);
+            return;
+        }
+
+        const ready = new Promise((resolve, reject) => {
+            this._vadReadyResolve = resolve;
+            this._vadReadyReject = reject;
+        });
 
         this._vadWorker.onmessage = (ev) => {
             const msg = ev.data || {};
@@ -242,6 +280,11 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
                 return;
             }
             if (msg.type === 'error') {
+                if (this._vadReadyReject) {
+                    this._vadReadyReject(new Error(msg.message || 'VAD worker error'));
+                    this._vadReadyReject = null;
+                    this._vadReadyResolve = null;
+                }
                 try { this._emitter.emit('error', new Error(msg.message || 'VAD worker error')); } catch (_) {}
                 return;
             }
@@ -254,13 +297,14 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
             }
         };
         this._vadWorker.onerror = (e) => {
-            try { this._emitter.emit('error', e.message || e); } catch (_) {}
+            const err = new Error(e.message || 'VAD worker script error');
+            if (this._vadReadyReject) {
+                this._vadReadyReject(err);
+                this._vadReadyReject = null;
+                this._vadReadyResolve = null;
+            }
+            try { this._emitter.emit('error', err); } catch (_) {}
         };
-
-        const ready = new Promise((resolve, reject) => {
-            this._vadReadyResolve = resolve;
-            setTimeout(() => reject(new Error('VAD worker init timeout')), 60000);
-        });
 
         this._vadWorker.postMessage({
             type: 'init',
@@ -270,29 +314,54 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
             threshold: this.config.threshold != null ? this.config.threshold : 0.5
         });
 
-        await ready;
-        this._session = null; // no main-thread ORT session
-        if (this.debug) console.log('[BusVAD] Worker ready (isolated ORT). Threshold:', this.config.threshold);
+        try {
+            // NO artificial timeout — wait until worker is ready or reports error
+            await ready;
+            this._useWorker = true;
+            this._session = null;
+            if (this.debug) console.log('[BusVAD] Worker ready (isolated ORT). Threshold:', this.config.threshold);
+        } catch (e) {
+            try { this._vadWorker.terminate(); } catch (_) {}
+            this._vadWorker = null;
+            if (this.debug) console.warn('[BusVAD] Worker init failed, main-thread fallback:', e && e.message || e);
+            await mainThreadInit(this);
+        }
     };
 
     BusVAD.prototype.feedChunk = function feedChunkWorker(chunk) {
-        if (!chunk || !chunk.length || !this._vadWorker) return;
-        const copy = chunk instanceof Float32Array ? new Float32Array(chunk) : new Float32Array(chunk);
+        if (!chunk || !chunk.length) return;
 
-        this._vadQueue = this._vadQueue.then(async () => {
+        if (!this._useWorker || !this._vadWorker) {
+            // Main-thread path (serialized)
+            const copy = chunk instanceof Float32Array ? new Float32Array(chunk) : new Float32Array(chunk);
+            this._vadQueue = (this._vadQueue || Promise.resolve()).then(async () => {
+                let triggered = false;
+                try {
+                    const ort = this.config.ort;
+                    if (!this._session || !ort) return;
+                    const tensor = new ort.Tensor('float32', copy, [1, copy.length]);
+                    const sr = new ort.Tensor('int64', [BigInt(this.config.sampleRate || 16000)], []);
+                    const res = await this._session.run({ input: tensor, sr, h: this._h, c: this._c });
+                    this._h = res.hn;
+                    this._c = res.cn;
+                    triggered = res.output.data[0] > (this.config.threshold ?? 0.5);
+                } catch (err) {
+                    try { this._emitter.emit('error', err); } catch (_) {}
+                    return;
+                }
+                applySpeechState(this, triggered, copy);
+            }).catch(() => {});
+            return;
+        }
+
+        const copy = chunk instanceof Float32Array ? new Float32Array(chunk) : new Float32Array(chunk);
+        const forBuffer = new Float32Array(copy);
+
+        this._vadQueue = (this._vadQueue || Promise.resolve()).then(async () => {
             const id = ++this._vadReqId;
             const resultPromise = new Promise((resolve) => {
                 this._vadPending.set(id, resolve);
-                // Timeout so a stuck worker cannot freeze the queue forever
-                setTimeout(() => {
-                    if (this._vadPending.has(id)) {
-                        this._vadPending.delete(id);
-                        resolve({ triggered: false, confidence: 0 });
-                    }
-                }, 2000);
             });
-            // Keep a separate copy for the speech buffer (transfer detaches `copy`)
-            const forBuffer = new Float32Array(copy);
             try {
                 this._vadWorker.postMessage(
                     { type: 'chunk', id, buffer: copy.buffer },
@@ -303,37 +372,35 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
                 return;
             }
             const msg = await resultPromise;
-            const triggered = !!(msg && msg.triggered);
-
-            if (triggered) {
-                if (!this._isSpeech) {
-                    this._isSpeech = true;
-                    this._speechBuffer = [];
-                    this._emitter.emit('speech-start');
-                }
-                this._redemptionCount = this._redemptionFrames;
-                this._speechBuffer.push(forBuffer);
-            } else if (this._isSpeech) {
-                this._redemptionCount--;
-                this._speechBuffer.push(forBuffer);
-                if (this._redemptionCount <= 0) {
-                    this._isSpeech = false;
-                    const total = this._speechBuffer.reduce((s, a) => s + a.length, 0);
-                    const audio = new Float32Array(total);
-                    let off = 0;
-                    for (const c of this._speechBuffer) { audio.set(c, off); off += c.length; }
-                    this._speechBuffer = [];
-                    if (audio.length < MIN_SPEECH_SAMPLES) {
-                        this._emitter.emit('misfire', { audio });
-                    } else {
-                        this._emitter.emit('speech-end', { audio });
-                    }
-                }
-            }
+            applySpeechState(this, !!(msg && msg.triggered), forBuffer);
         }).catch(() => {});
     };
 
-    const _destroy = BusVAD.prototype.destroy;
+    function applySpeechState(self, triggered, buf) {
+        if (triggered) {
+            if (!self._isSpeech) {
+                self._isSpeech = true;
+                self._speechBuffer = [];
+                self._emitter.emit('speech-start');
+            }
+            self._redemptionCount = self._redemptionFrames;
+            self._speechBuffer.push(buf);
+        } else if (self._isSpeech) {
+            self._redemptionCount--;
+            self._speechBuffer.push(buf);
+            if (self._redemptionCount <= 0) {
+                self._isSpeech = false;
+                const total = self._speechBuffer.reduce((s, a) => s + a.length, 0);
+                const audio = new Float32Array(total);
+                let off = 0;
+                for (const c of self._speechBuffer) { audio.set(c, off); off += c.length; }
+                self._speechBuffer = [];
+                if (audio.length < MIN_SPEECH_SAMPLES) self._emitter.emit('misfire', { audio });
+                else self._emitter.emit('speech-end', { audio });
+            }
+        }
+    }
+
     BusVAD.prototype.destroy = async function () {
         try {
             if (this._vadWorker) {
@@ -342,20 +409,24 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
                 this._vadWorker = null;
             }
         } catch (_) {}
-        if (typeof _destroy === 'function') return _destroy.apply(this, arguments);
+        this._session = null;
+        this._h = null;
+        this._c = null;
+        this._speechBuffer = [];
     };
 
-    const _reset = BusVAD.prototype.reset;
     BusVAD.prototype.reset = function () {
         try {
             if (this._vadWorker) this._vadWorker.postMessage({ type: 'reset' });
         } catch (_) {}
-        if (typeof _reset === 'function') return _reset.apply(this, arguments);
         this._isSpeech = false;
         this._redemptionCount = 0;
         this._speechBuffer = [];
+        if (this._h && this._h.data) this._h.data.fill(0);
+        if (this._c && this._c.data) this._c.data.fill(0);
     };
 })();
+
 
 // Pin main-thread ORT (OpenWakeWord) to single-thread as soon as it appears.
 (function pinMainOrt() {
