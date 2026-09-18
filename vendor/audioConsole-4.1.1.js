@@ -116,37 +116,50 @@ registerProcessor('audio-bus-processor', AudioBusProcessor);
 `;
 
 /**
- * Firefox-safe AudioBus.start: never force sampleRate on the AudioContext
- * (createMediaStreamSource fails when rates differ). Resample in the worklet.
+ * Firefox / all browsers: never force AudioContext sampleRate.
+ * Mic stream rate must match context rate (Firefox throws otherwise).
+ * Worklet resamples to 16 kHz for ORT / Vosk / OWW.
  */
-AudioBus.prototype.start = async function start() {
+AudioBus.prototype.start = async function startSampleRateSafe() {
     if (this._active) return;
 
-    try {
-        this._mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: this.config.deviceId
-                ? { deviceId: { exact: this.config.deviceId } }
-                : true
-        });
-    } catch (e) {
-        throw new Error(
-            `Microphone access failed: ${e.message || e.name}. ` +
-            `If you're on http://, try localhost or https://.`
-        );
+    const baseAudio = {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+    };
+    // Do NOT request sampleRate on getUserMedia — let the device pick;
+    // we resample in the worklet. Requesting 16k here fights Firefox.
+    if (this.config.deviceId) {
+        baseAudio.deviceId = { exact: this.config.deviceId };
     }
 
-    // Default (hardware) rate — required for Firefox MediaStreamSource connect.
-    // Chrome still works; worklet resamples to config.sampleRate (16 kHz).
-    this._audioContext = new AudioContext();
+    try {
+        this._mediaStream = await navigator.mediaDevices.getUserMedia({ audio: baseAudio });
+    } catch (e1) {
+        try {
+            this._mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: this.config.deviceId ? { deviceId: { exact: this.config.deviceId } } : true
+            });
+        } catch (e2) {
+            throw new Error(
+                `Microphone access failed: ${e2.message || e2.name}. ` +
+                `If you're on http://, try localhost or https://.`
+            );
+        }
+    }
 
+    // Hardware / default rate only — critical on Firefox.
+    this._audioContext = new AudioContext();
     if (this._audioContext.state === 'suspended') {
-        try { await this._audioContext.resume(); } catch (e) { /* retry later */ }
+        try { await this._audioContext.resume(); } catch (_) {}
     }
 
     const source = this._audioContext.createMediaStreamSource(this._mediaStream);
     this._sourceNode = source;
     this._gainNode = this._audioContext.createGain();
-    this._gainNode.gain.value = this.config.gain;
+    this._gainNode.gain.value = this.config.gain != null ? this.config.gain : 1;
 
     const blob = new Blob([FIXED_BUS_WORKLET_CODE], { type: 'application/javascript' });
     const workletURL = URL.createObjectURL(blob);
@@ -159,10 +172,12 @@ AudioBus.prototype.start = async function start() {
 
     this._workletNode.port.onmessage = (event) => {
         const chunk = event.data;
-        if (!chunk) return;
-        this.liveRing.push(chunk);
+        if (!chunk || !chunk.length) return;
+        // Copy before fan-out so worklet can reuse its buffer safely
+        const copy = chunk instanceof Float32Array ? new Float32Array(chunk) : new Float32Array(chunk);
+        this.liveRing.push(copy);
         for (const fn of this._subscribers) {
-            try { fn(chunk); } catch (err) { console.error('[AudioBus] subscriber error:', err); }
+            try { fn(copy); } catch (err) { console.error('[AudioBus] subscriber error:', err); }
         }
     };
 
@@ -176,15 +191,16 @@ AudioBus.prototype.start = async function start() {
     this._active = true;
     if (this.debug) {
         console.log(
-            '[AudioBus] Started (v4.1.1 Firefox-safe). Context rate:',
+            '[AudioBus] Started (sample-rate safe). Context:',
             this._audioContext.sampleRate,
-            '→ target',
-            this.config.sampleRate
+            'Hz → target',
+            this.config.sampleRate || 16000,
+            'Hz'
         );
     }
 };
 
-// Downstream (VAD / OWW / cache) always sees the target (16 kHz) rate.
+// Downstream always sees target (16 kHz) rate.
 Object.defineProperty(AudioBus.prototype, 'sampleRate', {
     get: function () {
         return this.config?.sampleRate ?? 16000;
@@ -192,10 +208,174 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
     configurable: true
 });
 
-// ---------------------------------------------------------------------------
-// Robust whisper.cpp response parsing (plain text, verbose_json, nested keys,
-// segments, OpenAI-style, forks). Overrides the strict data.text parser.
-// ---------------------------------------------------------------------------
+/**
+ * BusVAD → dedicated worker with its own ORT instance (isolated from OpenWakeWord).
+ */
+(function patchBusVadWorker() {
+    if (typeof BusVAD === 'undefined' || !BusVAD.prototype) return;
+
+    const MIN_SPEECH_SAMPLES = 2000;
+
+    function resolveUrl(rel) {
+        try {
+            return new URL(rel, import.meta.url).href;
+        } catch (_) {
+            return rel;
+        }
+    }
+
+    BusVAD.prototype.init = async function initWorkerVad() {
+        const workerUrl = resolveUrl('./busVad.worker.js');
+        // Prefer local Silero; fall back to CDN
+        const modelUrl = resolveUrl('../models/vad/silero_vad.onnx');
+        const ortScriptUrl = resolveUrl('../models/piper/ort.all.min.js');
+
+        this._vadWorker = new Worker(workerUrl);
+        this._vadReqId = 0;
+        this._vadPending = new Map();
+        this._vadQueue = Promise.resolve();
+
+        this._vadWorker.onmessage = (ev) => {
+            const msg = ev.data || {};
+            if (msg.type === 'ready') {
+                if (this._vadReadyResolve) this._vadReadyResolve();
+                return;
+            }
+            if (msg.type === 'error') {
+                try { this._emitter.emit('error', new Error(msg.message || 'VAD worker error')); } catch (_) {}
+                return;
+            }
+            if (msg.type === 'result') {
+                const pending = this._vadPending.get(msg.id);
+                if (pending) {
+                    this._vadPending.delete(msg.id);
+                    pending(msg);
+                }
+            }
+        };
+        this._vadWorker.onerror = (e) => {
+            try { this._emitter.emit('error', e.message || e); } catch (_) {}
+        };
+
+        const ready = new Promise((resolve, reject) => {
+            this._vadReadyResolve = resolve;
+            setTimeout(() => reject(new Error('VAD worker init timeout')), 60000);
+        });
+
+        this._vadWorker.postMessage({
+            type: 'init',
+            modelUrl,
+            ortScriptUrl,
+            sampleRate: this.config.sampleRate || 16000,
+            threshold: this.config.threshold != null ? this.config.threshold : 0.5
+        });
+
+        await ready;
+        this._session = null; // no main-thread ORT session
+        if (this.debug) console.log('[BusVAD] Worker ready (isolated ORT). Threshold:', this.config.threshold);
+    };
+
+    BusVAD.prototype.feedChunk = function feedChunkWorker(chunk) {
+        if (!chunk || !chunk.length || !this._vadWorker) return;
+        const copy = chunk instanceof Float32Array ? new Float32Array(chunk) : new Float32Array(chunk);
+
+        this._vadQueue = this._vadQueue.then(async () => {
+            const id = ++this._vadReqId;
+            const resultPromise = new Promise((resolve) => {
+                this._vadPending.set(id, resolve);
+                // Timeout so a stuck worker cannot freeze the queue forever
+                setTimeout(() => {
+                    if (this._vadPending.has(id)) {
+                        this._vadPending.delete(id);
+                        resolve({ triggered: false, confidence: 0 });
+                    }
+                }, 2000);
+            });
+            // Keep a separate copy for the speech buffer (transfer detaches `copy`)
+            const forBuffer = new Float32Array(copy);
+            try {
+                this._vadWorker.postMessage(
+                    { type: 'chunk', id, buffer: copy.buffer },
+                    [copy.buffer]
+                );
+            } catch (err) {
+                this._vadPending.delete(id);
+                return;
+            }
+            const msg = await resultPromise;
+            const triggered = !!(msg && msg.triggered);
+
+            if (triggered) {
+                if (!this._isSpeech) {
+                    this._isSpeech = true;
+                    this._speechBuffer = [];
+                    this._emitter.emit('speech-start');
+                }
+                this._redemptionCount = this._redemptionFrames;
+                this._speechBuffer.push(forBuffer);
+            } else if (this._isSpeech) {
+                this._redemptionCount--;
+                this._speechBuffer.push(forBuffer);
+                if (this._redemptionCount <= 0) {
+                    this._isSpeech = false;
+                    const total = this._speechBuffer.reduce((s, a) => s + a.length, 0);
+                    const audio = new Float32Array(total);
+                    let off = 0;
+                    for (const c of this._speechBuffer) { audio.set(c, off); off += c.length; }
+                    this._speechBuffer = [];
+                    if (audio.length < MIN_SPEECH_SAMPLES) {
+                        this._emitter.emit('misfire', { audio });
+                    } else {
+                        this._emitter.emit('speech-end', { audio });
+                    }
+                }
+            }
+        }).catch(() => {});
+    };
+
+    const _destroy = BusVAD.prototype.destroy;
+    BusVAD.prototype.destroy = async function () {
+        try {
+            if (this._vadWorker) {
+                this._vadWorker.postMessage({ type: 'destroy' });
+                this._vadWorker.terminate();
+                this._vadWorker = null;
+            }
+        } catch (_) {}
+        if (typeof _destroy === 'function') return _destroy.apply(this, arguments);
+    };
+
+    const _reset = BusVAD.prototype.reset;
+    BusVAD.prototype.reset = function () {
+        try {
+            if (this._vadWorker) this._vadWorker.postMessage({ type: 'reset' });
+        } catch (_) {}
+        if (typeof _reset === 'function') return _reset.apply(this, arguments);
+        this._isSpeech = false;
+        this._redemptionCount = 0;
+        this._speechBuffer = [];
+    };
+})();
+
+// Pin main-thread ORT (OpenWakeWord) to single-thread as soon as it appears.
+(function pinMainOrt() {
+    if (typeof window === 'undefined') return;
+    const pin = () => {
+        try {
+            if (window.ort && window.ort.env && window.ort.env.wasm) {
+                window.ort.env.wasm.numThreads = 1;
+                if (typeof window.ort.env.wasm.proxy === 'boolean') window.ort.env.wasm.proxy = false;
+                return true;
+            }
+        } catch (_) {}
+        return false;
+    };
+    if (pin()) return;
+    const iv = setInterval(() => { if (pin()) clearInterval(iv); }, 25);
+    setTimeout(() => clearInterval(iv), 60000);
+})();
+
+
 function _ac411_encodeWAV(samples, sampleRate) {
     const buffer = new ArrayBuffer(44 + samples.length * 2);
     const view = new DataView(buffer);
@@ -432,212 +612,3 @@ AkarinetVoice.prototype.cancelProcessing = function cancelProcessing() {
 };
 
 
-
-// ═══════════════════════════════════════════════════════════════════
-// Firefox / Linux fix: TypeError "Error in input stream" (onnxruntime)
-//
-// Cause: BusVAD.feedChunk fired overlapping session.run() calls while
-// sharing LSTM state tensors. ORT WASM on Firefox then fails the next
-// run with "Error in input stream".
-//
-// Fix: serialize VAD inference, copy each chunk, force ORT numThreads=1.
-// ═══════════════════════════════════════════════════════════════════
-
-function _ac411_configureOrt(ort) {
-    if (!ort || !ort.env || !ort.env.wasm) return;
-    try {
-        ort.env.wasm.numThreads = 1;
-        if (typeof ort.env.wasm.proxy === 'boolean') ort.env.wasm.proxy = false;
-    } catch (_) {}
-}
-
-if (typeof BusVAD !== 'undefined' && BusVAD.prototype) {
-    const _busVadInit = BusVAD.prototype.init;
-    BusVAD.prototype.init = async function () {
-        if (this.config && this.config.ort) _ac411_configureOrt(this.config.ort);
-        return _busVadInit.apply(this, arguments);
-    };
-
-    BusVAD.prototype.feedChunk = function (chunk) {
-        if (!chunk || !chunk.length) return;
-        const copy = chunk instanceof Float32Array
-            ? new Float32Array(chunk)
-            : new Float32Array(chunk);
-
-        this._vadQueue = (this._vadQueue || Promise.resolve())
-            .then(() => this._runVadSerialized(copy))
-            .catch((err) => {
-                try { this._emitter.emit('error', err); } catch (_) {}
-            });
-    };
-
-    BusVAD.prototype._runVadSerialized = async function (chunk) {
-        let triggered = false;
-        try {
-            triggered = await this._runVad(chunk);
-        } catch (err) {
-            try { this._emitter.emit('error', err); } catch (_) {}
-            return;
-        }
-
-        if (triggered) {
-            if (!this._isSpeech) {
-                this._isSpeech = true;
-                this._speechBuffer = [];
-                this._emitter.emit('speech-start');
-            }
-            this._redemptionCount = this._redemptionFrames;
-            this._speechBuffer.push(chunk);
-        } else if (this._isSpeech) {
-            this._redemptionCount--;
-            this._speechBuffer.push(chunk);
-            if (this._redemptionCount <= 0) {
-                this._isSpeech = false;
-                const total = this._speechBuffer.reduce((s, a) => s + a.length, 0);
-                const audio = new Float32Array(total);
-                let off = 0;
-                for (const c of this._speechBuffer) { audio.set(c, off); off += c.length; }
-                this._speechBuffer = [];
-                if (audio.length < 2000) {
-                    this._emitter.emit('misfire', { audio });
-                } else {
-                    this._emitter.emit('speech-end', { audio });
-                }
-            }
-        }
-    };
-}
-
-// Safer mic constraints on Linux (fallback to audio:true if rejected).
-(function patchBusStartConstraints() {
-    const prev = AudioBus.prototype.start;
-    AudioBus.prototype.start = async function () {
-        if (this._active) return;
-        // Temporarily use friendlier constraints via a one-shot config deviceId path
-        const originalDeviceId = this.config.deviceId;
-        const tryStart = async (constraints) => {
-            this._mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-        };
-        try {
-            await tryStart({
-                audio: {
-                    channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
-                    ...(originalDeviceId ? { deviceId: { exact: originalDeviceId } } : {})
-                }
-            });
-        } catch (_) {
-            await tryStart({
-                audio: originalDeviceId ? { deviceId: { exact: originalDeviceId } } : true
-            });
-        }
-        // Hand off to the rest of the Firefox-safe start (context + worklet)
-        // by inlining the remainder of the previous implementation:
-        this._audioContext = new AudioContext();
-        if (this._audioContext.state === 'suspended') {
-            try { await this._audioContext.resume(); } catch (_) {}
-        }
-        const source = this._audioContext.createMediaStreamSource(this._mediaStream);
-        this._sourceNode = source;
-        this._gainNode = this._audioContext.createGain();
-        this._gainNode.gain.value = this.config.gain;
-
-        const blob = new Blob([FIXED_BUS_WORKLET_CODE], { type: 'application/javascript' });
-        const workletURL = URL.createObjectURL(blob);
-        await this._audioContext.audioWorklet.addModule(workletURL);
-        URL.revokeObjectURL(workletURL);
-
-        this._workletNode = new AudioWorkletNode(this._audioContext, 'audio-bus-processor', {
-            processorOptions: { targetSampleRate: this.config.sampleRate || 16000 }
-        });
-        this._workletNode.port.onmessage = (event) => {
-            const chunk = event.data;
-            if (!chunk) return;
-            this.liveRing.push(chunk);
-            for (const fn of this._subscribers) {
-                try { fn(chunk); } catch (err) { console.error('[AudioBus] subscriber error:', err); }
-            }
-        };
-        source.connect(this._gainNode);
-        this._gainNode.connect(this._workletNode);
-        const muteGain = this._audioContext.createGain();
-        muteGain.gain.value = 0;
-        this._workletNode.connect(muteGain);
-        muteGain.connect(this._audioContext.destination);
-        this._active = true;
-        if (this.debug) {
-            console.log('[AudioBus] Started (Firefox-safe, serialized VAD path).',
-                this._audioContext.sampleRate, '→', this.config.sampleRate);
-        }
-    };
-})();
-
-const _voiceInit = AkarinetVoice.prototype.init;
-AkarinetVoice.prototype.init = async function () {
-    const ret = await _voiceInit.apply(this, arguments);
-    try {
-        if (typeof window !== 'undefined' && window.ort) _ac411_configureOrt(window.ort);
-    } catch (_) {}
-    return ret;
-};
-
-
-// Swallow ORT "Error in input stream" so OpenWakeWord doesn't spam / break the bus.
-(function patchOrtInputStreamSwallow() {
-    function isInputStreamErr(err) {
-        const m = (err && (err.message || err)) ? String(err.message || err) : '';
-        return /input stream/i.test(m);
-    }
-    if (typeof BusVAD !== 'undefined' && BusVAD.prototype && BusVAD.prototype._runVad) {
-        const orig = BusVAD.prototype._runVad;
-        BusVAD.prototype._runVad = async function (chunk) {
-            try {
-                return await orig.call(this, chunk);
-            } catch (err) {
-                if (isInputStreamErr(err)) return false;
-                throw err;
-            }
-        };
-    }
-    if (typeof OpenWakeWordProvider !== 'undefined' && OpenWakeWordProvider.prototype) {
-        const origFeed = OpenWakeWordProvider.prototype.feedChunk;
-        OpenWakeWordProvider.prototype.feedChunk = function (chunk) {
-            try {
-                const ret = origFeed.call(this, chunk);
-                // If engine uses a promise queue, also silence emitted errors
-                if (this._engine && !this._engine.__inputStreamPatched) {
-                    this._engine.__inputStreamPatched = true;
-                    const eng = this._engine;
-                    const origProcess = eng._processChunk && eng._processChunk.bind(eng);
-                    if (origProcess) {
-                        eng._processChunk = async function (chunk, opts) {
-                            try {
-                                return await origProcess(chunk, opts);
-                            } catch (err) {
-                                if (isInputStreamErr(err)) return;
-                                throw err;
-                            }
-                        };
-                    }
-                    const origVad = eng._runVad && eng._runVad.bind(eng);
-                    if (origVad) {
-                        eng._runVad = async function (chunk) {
-                            try {
-                                return await origVad(chunk);
-                            } catch (err) {
-                                if (isInputStreamErr(err)) return false;
-                                throw err;
-                            }
-                        };
-                    }
-                }
-                return ret;
-            } catch (err) {
-                if (isInputStreamErr(err)) return;
-                throw err;
-            }
-        };
-    }
-})();
