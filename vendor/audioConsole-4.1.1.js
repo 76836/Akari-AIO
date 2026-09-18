@@ -211,6 +211,30 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
 /**
  * BusVAD → dedicated worker with its own ORT instance (isolated from OpenWakeWord).
  */
+
+/**
+ * onnxruntime-web (wasm) cannot run concurrent session.run() on one runtime.
+ * BusVAD (main-thread fallback) + OpenWakeWord both ran every chunk in parallel →
+ * "Session mismatch" / "Session already started".
+ */
+const _ac411OrtGate = { p: Promise.resolve() };
+function _ac411WithOrtLock(fn) {
+    const run = _ac411OrtGate.p.then(() => fn(), () => fn());
+    _ac411OrtGate.p = run.then(() => {}, () => {});
+    return run;
+}
+
+if (typeof OpenWakeWordProvider !== 'undefined' && OpenWakeWordProvider.prototype) {
+    OpenWakeWordProvider.prototype.feedChunk = function feedChunkLocked(chunk) {
+        if (!this._engine || !this._isListening) return;
+        this._engine._processingQueue = this._engine._processingQueue
+            .then(() => _ac411WithOrtLock(() => this._engine._processChunk(chunk)))
+            .catch((err) => {
+                try { this._engine._emitter.emit('error', err); } catch (_) {}
+            });
+    };
+}
+
 (function patchBusVadWorker() {
     if (typeof BusVAD === 'undefined' || !BusVAD.prototype) return;
 
@@ -339,12 +363,14 @@ Object.defineProperty(AudioBus.prototype, 'sampleRate', {
                 try {
                     const ort = this.config.ort;
                     if (!this._session || !ort) return;
-                    const tensor = new ort.Tensor('float32', copy, [1, copy.length]);
-                    const sr = new ort.Tensor('int64', [BigInt(this.config.sampleRate || 16000)], []);
-                    const res = await this._session.run({ input: tensor, sr, h: this._h, c: this._c });
-                    this._h = res.hn;
-                    this._c = res.cn;
-                    triggered = res.output.data[0] > (this.config.threshold ?? 0.5);
+                    await _ac411WithOrtLock(async () => {
+                        const tensor = new ort.Tensor('float32', copy, [1, copy.length]);
+                        const sr = new ort.Tensor('int64', [BigInt(this.config.sampleRate || 16000)], []);
+                        const res = await this._session.run({ input: tensor, sr, h: this._h, c: this._c });
+                        this._h = res.hn;
+                        this._c = res.cn;
+                        triggered = res.output.data[0] > (this.config.threshold ?? 0.5);
+                    });
                 } catch (err) {
                     try { this._emitter.emit('error', err); } catch (_) {}
                     return;

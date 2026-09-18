@@ -509,7 +509,7 @@
             const _prog = (p, t) => window.dispatchEvent(new CustomEvent('audioConsoleProgress', { detail: { percent: p, text: t } }));
             try {
                 _prog(18, 'Importing Audio Console module…');
-                const mod = await import('./vendor/audioConsole-4.2.1.js?v=sr-vad-worker-2');
+                const mod = await import('./vendor/audioConsole-4.2.1.js?v=sr-vad-worker-3');
                 const { AkarinetVoice } = mod;
                 _prog(25, 'Engine loaded — preparing ${sr}…');
                 const config = ${JSON.stringify(config)};
