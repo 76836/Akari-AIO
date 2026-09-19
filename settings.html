@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Akari-AIO Settings</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b1220; --panel:#111827; --text:#ecf7ff; --muted:#9db0d0; --accent:#7dd3fc; --border:rgba(148,163,184,.25); }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 16px; max-width: 480px; margin-inline: auto; }
+  h1 { font-size: 1.15rem; margin: 0 0 4px; }
+  p.sub { color: var(--muted); font-size: .85rem; margin: 0 0 16px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  section h2 { font-size: .95rem; margin: 0 0 10px; color: var(--accent); }
+  label.row { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0; cursor: pointer; font-size: .92rem; line-height: 1.35; }
+  label.row input { margin-top: 3px; accent-color: var(--accent); }
+  .hint { display: block; color: var(--muted); font-size: .78rem; margin-top: 2px; }
+  .actions { display: flex; gap: 8px; margin-top: 8px; }
+  button { flex: 1; padding: 12px; border-radius: 999px; border: none; font-weight: 600; cursor: pointer; }
+  .save { background: #2f5fcc; color: #fff; }
+  .close { background: rgba(148,163,184,.25); color: var(--text); }
+</style>
+</head>
+<body>
+  <h1>Akari-AIO Settings</h1>
+  <p class="sub">Minimal performance &amp; behavior toggles. Reload applies module changes.</p>
+
+  <section>
+    <h2>Performance</h2>
+    <label class="row">
+      <input type="checkbox" id="noAudioConsole" />
+      <span><strong>--no-AudioConsole</strong>
+        <span class="hint">Disable wake word / mic pipeline (text-only). Sets wake script to null.</span>
+      </span>
+    </label>
+    <label class="row">
+      <input type="checkbox" id="noVideo" />
+      <span><strong>--NoVideo</strong>
+        <span class="hint">Disable VRM avatar. Sets avatar script to null.</span>
+      </span>
+    </label>
+  </section>
+
+  <section>
+    <h2>Sleep at Night</h2>
+    <label class="row">
+      <input type="checkbox" id="sleepAtNight" />
+      <span>Reload after 3 hours fully idle at night
+        <span class="hint">Night = 22:00–06:00 local. Any voice, text, or pointer activity resets the timer.</span>
+      </span>
+    </label>
+  </section>
+
+  <section>
+    <h2>Voice feedback</h2>
+    <label class="row">
+      <input type="checkbox" id="thinkingSignal" />
+      <span>Play signal when thinking
+        <span class="hint">Starts after transcription begins (not while you talk). Fades out when speech synthesis starts.</span>
+      </span>
+    </label>
+  </section>
+
+  <div class="actions">
+    <button type="button" class="close" id="btnClose">Close</button>
+    <button type="button" class="save" id="btnSave">Save &amp; reload</button>
+  </div>
+
+<script>
+(function () {
+  const ls = (k) => localStorage.getItem(k);
+  const isOn = (k) => ls(k) === '1' || ls(k) === 'true';
+
+  document.getElementById('noAudioConsole').checked =
+    isOn('aio_noAudioConsole') || ls('selectedWakeScript') === 'null' || ls('selectedWakeScript') === 'off';
+  document.getElementById('noVideo').checked =
+    isOn('aio_noVideo') || ls('selectedAvatarScript') === 'null' || ls('selectedAvatarScript') === 'off';
+  document.getElementById('sleepAtNight').checked = isOn('aio_sleepAtNight');
+  document.getElementById('thinkingSignal').checked = isOn('aio_thinkingSignal');
+
+  document.getElementById('btnClose').onclick = function () {
+    try {
+      if (window.parent && window.parent !== window && window.parent.app && window.parent.app.ui) {
+        window.parent.app.ui.closeWindow();
+        return;
+      }
+    } catch (_) {}
+    history.back();
+  };
+
+  document.getElementById('btnSave').onclick = function () {
+    const noAC = document.getElementById('noAudioConsole').checked;
+    const noVid = document.getElementById('noVideo').checked;
+    const sleep = document.getElementById('sleepAtNight').checked;
+    const signal = document.getElementById('thinkingSignal').checked;
+
+    localStorage.setItem('aio_noAudioConsole', noAC ? '1' : '0');
+    localStorage.setItem('aio_noVideo', noVid ? '1' : '0');
+    localStorage.setItem('aio_sleepAtNight', sleep ? '1' : '0');
+    localStorage.setItem('aio_thinkingSignal', signal ? '1' : '0');
+
+    // Module URLs: null disables loadModule
+    localStorage.setItem('selectedWakeScript', noAC ? 'null' : './engine/audioConsole.js');
+    localStorage.setItem('selectedAvatarScript', noVid ? 'null' : './characters/akari/VRM4.js');
+
+    // Tell parent to reload so modules re-bind
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.location.reload();
+        return;
+      }
+    } catch (_) {}
+    location.href = './';
+  };
+})();
+</script>
+</body>
+</html>

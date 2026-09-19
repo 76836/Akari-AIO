@@ -28,8 +28,19 @@
             'akari:skipLoadingScreen': 'true',
             ac41_ttsGreeting: 'true'
         };
-        // Always apply AIO offline defaults (overrides stale main-AkariNet localStorage)
-        Object.keys(d).forEach(function (k) { localStorage.setItem(k, d[k]); });
+        // Seed AIO offline defaults only when unset (so Settings can stick)
+        Object.keys(d).forEach(function (k) {
+            if (localStorage.getItem(k) === null || localStorage.getItem(k) === '') {
+                localStorage.setItem(k, d[k]);
+            }
+        });
+        // Performance flags → null module URLs (loadModule skips null/off)
+        if (localStorage.getItem('aio_noAudioConsole') === '1') {
+            localStorage.setItem('selectedWakeScript', 'null');
+        }
+        if (localStorage.getItem('aio_noVideo') === '1') {
+            localStorage.setItem('selectedAvatarScript', 'null');
+        }
     })();
     </script>
     <style>
@@ -401,7 +412,7 @@
     <div id="screensaver-container" aria-hidden="true"></div>
     <div id="chat-box" class="icemorphic chat-box collapsed" style="border: none;" aria-live="polite">
         <div class="chat-header">
-            <button id="settingsButton" class="icemorphic toggle-btn" onclick="loadscreen('Settings disabled in Akari-AIO')" aria-label="Open settings">⚙</button>
+            <button id="settingsButton" class="icemorphic toggle-btn" onclick="app.ui.openWindow('./settings.html')" aria-label="Open settings">⚙</button>
             <button id="historyButton" class="icemorphic toggle-btn" type="button" aria-label="Chat history" title="Chat history">☰</button>
             <div class="chat-title">loading...</div>
             <div class="chat-actions">
@@ -696,6 +707,41 @@ if ('serviceWorker' in navigator) {
                     app.core.loadBackground();
                     app.core.initScreensaver();
 
+                    // Sleep at Night: 3h fully idle during 22:00–06:00 → reload
+                    (function setupSleepAtNight() {
+                        function on() {
+                            try { return localStorage.getItem('aio_sleepAtNight') === '1' || localStorage.getItem('aio_sleepAtNight') === 'true'; }
+                            catch (_) { return false; }
+                        }
+                        function isNight(d) {
+                            const h = (d || new Date()).getHours();
+                            return h >= 22 || h < 6;
+                        }
+                        let lastActive = Date.now();
+                        const mark = () => { lastActive = Date.now(); };
+                        ['pointerdown', 'keydown', 'touchstart'].forEach(ev => window.addEventListener(ev, mark, { passive: true }));
+                        window.addEventListener('akari:user-input', mark);
+                        window.addEventListener('audioConsoleWakeSound', mark);
+                        window.addEventListener('audioConsoleSpeechStart', mark);
+                        window.addEventListener('audioConsoleProcessing', mark);
+                        window.addEventListener('akari:tts-start', mark);
+                        window.addEventListener('akari:tts-end', mark);
+                        // Also treat screensaver activity path
+                        const _reset = app.core && app.core.resetScreensaverTimer;
+                        if (typeof app.core.resetScreensaverTimer === 'function') {
+                            const orig = app.core.resetScreensaverTimer.bind(app.core);
+                            app.core.resetScreensaverTimer = function () { mark(); return orig(); };
+                        }
+                        setInterval(function () {
+                            if (!on()) return;
+                            if (!isNight()) return;
+                            if (Date.now() - lastActive < 3 * 60 * 60 * 1000) return;
+                            console.log('[AIO] Sleep at Night — reloading after 3h idle');
+                            location.reload();
+                        }, 60000);
+                    })();
+
+
                     await app.core.loadModule('avatar', app.config.modules.avatar, 'Avatar');
                     await app.core.loadModule('ai', app.config.modules.ai, 'AI Engine');
                     await app.core.loadModule('reflex', app.config.modules.reflex, 'Reflex Engine');
@@ -813,7 +859,7 @@ if ('serviceWorker' in navigator) {
 
                 loadModule: (key, src, label) => {
                     return new Promise((resolve) => {
-                        if (!src || src === 'off') { resolve(); return; }
+                        if (!src || src === 'off' || src === 'null' || src === 'undefined') { app.ui.log(label + ' skipped.'); resolve(); return; }
                         const s = document.createElement('script');
                         s.src = src;
                         s.onload = () => { app.ui.log(`${label} OK.`); resolve(); };
@@ -834,7 +880,7 @@ if ('serviceWorker' in navigator) {
                     app.core.syncActionButton(true);
                     app.ui.setTyping('Akari');
                     if (val.toLowerCase().includes('settings')) {
-                        app.ui.openWindow('./settings');
+                        app.ui.openWindow('./settings.html');
                         app.core.say("Opening settings panel.");
                         return;
                     }
@@ -1003,5 +1049,6 @@ if ('serviceWorker' in navigator) {
             if (btn && box && box.classList.contains('collapsed')) btn.innerText = '+';
         });
     </script>
+    <script src="./engine/thinkingSignal.js"></script>
 </body>
 </html>
