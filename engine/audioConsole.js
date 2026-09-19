@@ -52,6 +52,8 @@
         vadThreshold: lsNum('ac41_vadThreshold', 0.5),
         // Longer end-of-speech silence so pauses mid-utterance stay one segment (~1.6s)
         vadRedemptionMs: lsNum('ac41_vadRedemptionMs', 1600),
+        // After wake, stream all mic audio to STT; VAD only ends the utterance
+        nonBlockingVad: lsBool('aio_nonBlockingVad', false),
         wakewords: (ls('ac41_wakewords', 'hey akari,akari')).split(',').map(s => s.trim()).filter(Boolean),
         cleanup: false,
         debugWakeSound: lsBool('ac41_debug', false),
@@ -329,6 +331,16 @@
         voiceInstance._armKind = 'wake-prompt';
         setVisualState('listening');
         apStatus('Prompt done — listening…', { busy: true });
+        // --non-blocking-VAD: open STT stream immediately (do not wait for VAD speech-start)
+        if (lsBool('aio_nonBlockingVad', false) && voiceInstance.srProvider
+            && typeof voiceInstance.srProvider.startStreaming === 'function') {
+            try {
+                voiceInstance.srProvider.startStreaming();
+                console.log('[AudioConsole] non-blocking VAD — STT streaming after wake');
+            } catch (e) {
+                console.warn('[AudioConsole] startStreaming failed', e);
+            }
+        }
     }
 
     // Gate ASR until after wake chime/greeting so only post-wake speech is transcribed
@@ -520,7 +532,7 @@
             const _prog = (p, t) => window.dispatchEvent(new CustomEvent('audioConsoleProgress', { detail: { percent: p, text: t } }));
             try {
                 _prog(18, 'Importing Audio Console module…');
-                const mod = await import('./vendor/audioConsole-4.2.1.js?v=ort-lock-1');
+                const mod = await import('./vendor/audioConsole-4.2.1.js?v=nb-vad-1');
                 const { AkarinetVoice } = mod;
                 _prog(25, 'Engine loaded — preparing ${sr}…');
                 const config = ${JSON.stringify(config)};
@@ -552,7 +564,7 @@
             clearTimeout(initWatchdog);
             clearTimeout(initStuck);
             try { restoreFetch(); } catch (_) {}
-            acLoadFail('could not load audioConsole-4.2.1.js?v=ort-lock-1 (network or CDN)');
+            acLoadFail('could not load audioConsole-4.2.1.js?v=nb-vad-1 (network or CDN)');
         };
 
         window.__ac41RestoreFetch = restoreFetch;

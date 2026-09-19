@@ -437,21 +437,32 @@ AkarinetVoice.prototype.init = async function init421() {
             this._log && this._log('INFO', 'Bus → srProvider.feedChunk wired (progressive Vosk)');
         }
         if (this.busVad) {
-            this.busVad.on('speech-start', () => {
-                if (typeof this.srProvider.startStreaming === 'function') {
-                    const requireWake = !!this.config.requireWakeSound;
-                    const hasWake = !!this.wakeSoundDetectedTime;
-                    const gated = typeof window !== 'undefined' && !!window.__ac41AsrBlocked;
-                    if ((!requireWake || hasWake) && !gated) {
-                        try { this.srProvider.startStreaming(); } catch (_) {}
-                    }
+            const nonBlocking = !!(this.config.nonBlockingVad
+                || (typeof window !== 'undefined' && window.localStorage
+                    && (localStorage.getItem('aio_nonBlockingVad') === '1'
+                        || localStorage.getItem('aio_nonBlockingVad') === 'true')));
+            const tryStartStream = () => {
+                if (typeof this.srProvider.startStreaming !== 'function') return;
+                const requireWake = !!this.config.requireWakeSound;
+                const hasWake = !!this.wakeSoundDetectedTime;
+                const gated = typeof window !== 'undefined' && !!window.__ac41AsrBlocked;
+                if ((!requireWake || hasWake) && !gated) {
+                    try { this.srProvider.startStreaming(); } catch (_) {}
                 }
-            });
+            };
+            // Default: open STT on VAD speech-start. Non-blocking: also open as soon as
+            // wake is armed (adapter calls startStreaming after prompt); speech-start is backup.
+            this.busVad.on('speech-start', () => { tryStartStream(); });
             this.busVad.on('speech-end', () => {
                 if (typeof this.srProvider.stopStreaming === 'function') {
                     try { this.srProvider.stopStreaming(); } catch (_) {}
                 }
             });
+            if (nonBlocking) {
+                this._log && this._log('INFO', 'non-blocking VAD: STT gets all post-wake audio; VAD ends utterance only');
+                // If wake was already armed before this wire (rare), open stream now
+                tryStartStream();
+            }
         }
     }
 };
