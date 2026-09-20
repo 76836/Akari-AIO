@@ -1,6 +1,7 @@
 /**
- * Thinking indicator: plays after a wake-armed command reaches processing.
- * Stops only when spoken response synthesis begins (akari:tts-start / speak).
+ * Thinking indicator — single instance only.
+ * Starts after wake-armed processing; stops when spoken synthesis begins.
+ * A newer start/stop always cancels any previous loop (no stacked audio).
  */
 (function () {
   'use strict';
@@ -20,6 +21,7 @@
   var master = null;
   var stopFn = null;
   var fading = false;
+  var gen = 0; // bumped on every start/stop — invalidates in-flight async work
 
   function midi(n) {
     return 440 * Math.pow(2, (n - 69) / 12);
@@ -52,9 +54,19 @@
     if (!AC) return null;
     ctx = new AC();
     master = ctx.createGain();
-    master.gain.value = 0.65;
+    master.gain.value = 0;
     master.connect(ctx.destination);
     return ctx;
+  }
+
+  function rebuildMaster() {
+    if (!ctx) return;
+    try {
+      if (master) master.disconnect();
+    } catch (_) {}
+    master = ctx.createGain();
+    master.gain.value = 0;
+    master.connect(ctx.destination);
   }
 
   function unlock() {
@@ -68,44 +80,68 @@
     });
   }
 
-  function armUnlock() { unlock(); }
+  function armUnlock() {
+    unlock();
+  }
   ['pointerdown', 'keydown', 'touchstart', 'click'].forEach(function (ev) {
     window.addEventListener(ev, armUnlock, { passive: true, capture: true });
   });
   window.addEventListener('audioConsoleWakeSound', armUnlock);
 
-  function hardStop() {
+  function hardStopScheduler() {
     if (stopFn) {
-      try { stopFn(); } catch (_) {}
+      try {
+        stopFn();
+      } catch (_) {}
       stopFn = null;
+    }
+  }
+
+  /** Kill any playing/scheduled notes immediately (no stack). */
+  function hardKill() {
+    gen++;
+    hardStopScheduler();
+    fading = false;
+    if (ctx && master) {
+      try {
+        master.gain.cancelScheduledValues(ctx.currentTime);
+        master.gain.setValueAtTime(0, ctx.currentTime);
+      } catch (_) {}
+      rebuildMaster();
     }
   }
 
   function startLoop() {
     if (!enabled()) return;
-    // Must be a wake-driven command cycle
     if (!window.__ac41HadWakeForSignal) {
       console.log('[thinkingSignal] skip — no wake for this cycle');
       return;
     }
-    hardStop();
+
+    hardKill();
+    var myGen = gen;
     fading = false;
+
     unlock().then(function () {
+      if (myGen !== gen) return; // superseded by newer start/stop
       if (!enabled() || !window.__ac41HadWakeForSignal) return;
       var c = ensureCtx();
-      if (!c) return;
+      if (!c || !master) return;
       if (c.state !== 'running') c.resume().catch(function () {});
+
       try {
         master.gain.cancelScheduledValues(c.currentTime);
         master.gain.setValueAtTime(0.65, c.currentTime);
       } catch (_) {}
+
       var m = [0, 7, 3, 10, 7, 12, 3, 7];
       var i = 0;
       var nextT = c.currentTime + 0.1;
       var timer = null;
       var stopped = false;
+
       function tick() {
-        if (stopped) return;
+        if (stopped || myGen !== gen) return;
         var now = c.currentTime;
         if (nextT < now - 0.05) nextT = now + 0.05;
         while (nextT < now + 0.45) {
@@ -113,7 +149,7 @@
           note(c, master, nextT, { f: f, dur: 0.5, vol: 0.75, a: 0.003 });
           note(c, master, nextT, { type: 'triangle', f: f * 2, dur: 0.25, vol: 0.25, a: 0.002, lp: 2000 });
           note(c, master, nextT, { f: f * 6, dur: 0.05, vol: 0.08, a: 0.001 });
-          nextT += (i % 8 === 7) ? 0.55 : 0.2;
+          nextT += i % 8 === 7 ? 0.55 : 0.2;
           i++;
         }
         timer = setTimeout(tick, 50);
@@ -124,43 +160,60 @@
         if (timer) clearTimeout(timer);
         timer = null;
       };
-      console.log('[thinkingSignal] playing');
+      console.log('[thinkingSignal] playing gen=' + myGen);
     });
   }
 
   function fadeOut(ms) {
-    if (!stopFn && !master) return;
+    if (ms === 0 || ms === '0') {
+      hardKill();
+      window.__ac41HadWakeForSignal = false;
+      return;
+    }
+    if (!stopFn && !master) {
+      window.__ac41HadWakeForSignal = false;
+      return;
+    }
     if (fading) {
-      hardStop();
+      hardKill();
+      window.__ac41HadWakeForSignal = false;
       return;
     }
     fading = true;
+    var myGen = gen;
     var durMs = ms != null ? ms : 700;
     var c = ctx;
     if (c && master) {
       var t0 = c.currentTime;
       try {
         master.gain.cancelScheduledValues(t0);
-        master.gain.setValueAtTime(Math.max(0.0001, master.gain.value), t0);
+        master.gain.setValueAtTime(Math.max(0.0001, master.gain.value || 0.65), t0);
         master.gain.linearRampToValueAtTime(0.0001, t0 + durMs / 1000);
       } catch (_) {}
       setTimeout(function () {
-        hardStop();
+        if (myGen !== gen) return;
+        hardStopScheduler();
         fading = false;
+        rebuildMaster();
       }, durMs + 80);
     } else {
-      hardStop();
-      fading = false;
+      hardKill();
     }
-    // End of thinking cycle
     window.__ac41HadWakeForSignal = false;
   }
 
-  window.AioThinkingSignal = { start: startLoop, stop: fadeOut, unlock: unlock, enabled: enabled };
+  window.AioThinkingSignal = {
+    start: startLoop,
+    stop: fadeOut,
+    kill: hardKill,
+    unlock: unlock,
+    enabled: enabled
+  };
 
   window.addEventListener('audioConsoleProcessing', startLoop);
-  // ONLY stop when synthesis begins — not on STT result / processing end
-  window.addEventListener('akari:tts-start', function () { fadeOut(700); });
+  window.addEventListener('akari:tts-start', function () {
+    fadeOut(700);
+  });
 
   function wrapSpeak() {
     if (typeof window.speak !== 'function' || window.speak.__aioSignalWrapped) {
@@ -168,7 +221,9 @@
     }
     var orig = window.speak;
     window.speak = function () {
-      try { window.dispatchEvent(new CustomEvent('akari:tts-start')); } catch (_) {}
+      try {
+        window.dispatchEvent(new CustomEvent('akari:tts-start'));
+      } catch (_) {}
       fadeOut(700);
       return orig.apply(this, arguments);
     };

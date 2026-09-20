@@ -51,7 +51,7 @@
 
         vadThreshold: lsNum('ac41_vadThreshold', 0.5),
         // Longer end-of-speech silence so pauses mid-utterance stay one segment (~1.6s)
-        vadRedemptionMs: lsNum('ac41_vadRedemptionMs', 1600),
+        vadRedemptionMs: lsNum('ac41_vadRedemptionMs', 3000), // 3s silence before speech-end
         // After wake, stream all mic audio to STT; VAD only ends the utterance
         nonBlockingVad: lsBool('aio_nonBlockingVad', false),
         wakewords: (ls('ac41_wakewords', 'hey akari,akari')).split(',').map(s => s.trim()).filter(Boolean),
@@ -585,7 +585,7 @@
             const _prog = (p, t) => window.dispatchEvent(new CustomEvent('audioConsoleProgress', { detail: { percent: p, text: t } }));
             try {
                 _prog(18, 'Importing Audio Console module…');
-                const mod = await import('./vendor/audioConsole-4.2.1.js?v=wake-oneshot-1');
+                const mod = await import('./vendor/audioConsole-4.2.1.js?v=seq-wake-vad3-1');
                 const { AkarinetVoice } = mod;
                 _prog(25, 'Engine loaded — preparing ${sr}…');
                 const config = ${JSON.stringify(config)};
@@ -617,7 +617,7 @@
             clearTimeout(initWatchdog);
             clearTimeout(initStuck);
             try { restoreFetch(); } catch (_) {}
-            acLoadFail('could not load audioConsole-4.2.1.js?v=wake-oneshot-1 (network or CDN)');
+            acLoadFail('could not load audioConsole-4.2.1.js?v=seq-wake-vad3-1 (network or CDN)');
         };
 
         window.__ac41RestoreFetch = restoreFetch;
@@ -671,21 +671,52 @@
         }
     });
 
+    // Monotonic id so only the latest wake→prompt→arm cycle may arm listening
+    let __wakeCycleId = 0;
+
     window.addEventListener('audioConsoleWakeSound', (e) => {
         const cls = e.detail && e.detail.class;
-        // Core _onWakeDetect already stamped wakeSoundDetectedTime at detect time.
-        // Clear it until the prompt finishes so speech during the prompt is not a command.
-        window.__ac41AsrBlocked = true;
-        window.__ac41HadWakeForSignal = true; // allows thinking signal for this command cycle
-        if (voiceInstance) {
-            voiceInstance.wakeSoundDetectedTime = null;
-            if (voiceInstance.srProvider && typeof voiceInstance.srProvider.stopStreaming === 'function') {
-                try { voiceInstance.srProvider.stopStreaming(); } catch (_) {}
-            }
+        const cycle = ++__wakeCycleId;
+        console.log('[AudioConsole] wake cycle', cycle, 'class=', cls || 'oww');
+
+        // Latest wake overwrites everything in flight
+        clearProcessingSafety();
+        if (continuedArmTimer) {
+            clearTimeout(continuedArmTimer);
+            continuedArmTimer = null;
         }
+        try {
+            if (window.AioThinkingSignal && typeof window.AioThinkingSignal.stop === 'function') {
+                window.AioThinkingSignal.stop(0);
+            }
+        } catch (_) {}
+        try {
+            if (wakeAudio) {
+                wakeAudio.onended = null;
+                wakeAudio.onerror = null;
+                wakeAudio.pause();
+                wakeAudio.currentTime = 0;
+            }
+        } catch (_) {}
+        if (voiceInstance) {
+            try {
+                if (typeof voiceInstance.cancelProcessing === 'function') voiceInstance.cancelProcessing();
+            } catch (_) {}
+            try {
+                if (voiceInstance.srProvider && typeof voiceInstance.srProvider.stopStreaming === 'function') {
+                    voiceInstance.srProvider.stopStreaming();
+                }
+            } catch (_) {}
+            voiceInstance.wakeSoundDetectedTime = null;
+            voiceInstance._isProcessing = false;
+        }
+        disarmCommandArm('re-wake');
+
+        window.__ac41AsrBlocked = true;
+        window.__ac41HadWakeForSignal = true;
 
         if (cls === 'continued') {
-            // Follow-up window: no prompt, arm immediately
+            if (cycle !== __wakeCycleId) return;
             armListenAfterPrompt(1);
             pulseVrmWake('audioConsole-wakesound');
             return;
@@ -693,7 +724,14 @@
 
         setVisualState(cls === 'manual' ? 'listening' : 'wake', { score: e.detail && e.detail.score });
         apStatus('Wake prompt…', { busy: true });
-        playWakeSound().then(() => armListenAfterPrompt(cls === 'manual' ? 1 : (e.detail && e.detail.score)));
+        playWakeSound().then(() => {
+            // Stale cycle (newer wake arrived while prompt played) — do not arm
+            if (cycle !== __wakeCycleId) {
+                console.log('[AudioConsole] stale wake cycle', cycle, 'ignored (current', __wakeCycleId, ')');
+                return;
+            }
+            armListenAfterPrompt(cls === 'manual' ? 1 : (e.detail && e.detail.score));
+        });
         pulseVrmWake('audioConsole-wakesound');
     });
     window.addEventListener('audioConsoleSpeechStart', () => {
