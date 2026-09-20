@@ -27,13 +27,53 @@ Tool results will be returned to you as:
 </tool_response>
 Use tools when they help (time, search, apps, reminders, etc.). Do not invent tool names; use tool_search first if needed.`;
 
+  function pageIsLocal() {
+    const h = (location.hostname || '').toLowerCase();
+    return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1' || h === '';
+  }
+
+  /** Prefer same hostname label the page used (localhost vs 127.0.0.1) to avoid browser private-network quirks. */
+  function normalizeLocalUrl(url) {
+    if (!url) return url;
+    try {
+      const u = new URL(url, location.href);
+      const host = u.hostname.toLowerCase();
+      const isLoop = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+      if (!isLoop) return u.origin;
+      if (pageIsLocal()) {
+        // Match the page's host string exactly
+        const pageHost = location.hostname || 'localhost';
+        u.hostname = pageHost === '127.0.0.1' ? '127.0.0.1' : (pageHost === '[::1]' || pageHost === '::1' ? '127.0.0.1' : 'localhost');
+        // If page is on localhost, force localhost; if page is 127.0.0.1, force that
+        if (location.hostname === 'localhost') u.hostname = 'localhost';
+        else if (location.hostname === '127.0.0.1') u.hostname = '127.0.0.1';
+        else u.hostname = 'localhost';
+      }
+      if (!u.port) u.port = '8080';
+      return u.origin;
+    } catch (_) {
+      return url;
+    }
+  }
+
+  function defaultLocalOrigin() {
+    const host = location.hostname === '127.0.0.1' ? '127.0.0.1' : 'localhost';
+    return 'http://' + host + ':8080';
+  }
+
   function getAutoServerDetails() {
     try {
       const servers = JSON.parse(localStorage.getItem('lcpp_servers') || '[]');
-      const found = servers.find(s => s.online) || null;
-      if (found) return found;
+      const found = servers.find(s => s.online) || servers[0] || null;
+      if (found && found.url) {
+        return {
+          url: normalizeLocalUrl(found.url),
+          model: found.model || 'local',
+          online: !!found.online
+        };
+      }
     } catch (e) {}
-    return { url: 'http://127.0.0.1:8080', model: 'local', online: true };
+    return { url: defaultLocalOrigin(), model: 'local', online: true };
   }
 
   function actionsEnabled() {
@@ -50,7 +90,7 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
 
   function baseUrl() {
     const s = getAutoServerDetails();
-    return (s && s.url ? s.url : 'http://127.0.0.1:8080').replace(/\/+$/, '');
+    return normalizeLocalUrl((s && s.url) ? s.url : defaultLocalOrigin()).replace(/\/+$/, '');
   }
 
   function modelName() {
@@ -58,19 +98,38 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
     return (s && s.model) ? s.model : 'local';
   }
 
-  // Boot status (non-fatal)
-  (async function bootStatus() {
-    const url = baseUrl();
+  function candidateOrigins() {
+    const primary = baseUrl();
+    const out = [primary];
     try {
-      const h = await fetch(url + '/health', { method: 'GET' });
-      if (h.ok) {
-        say(`<i>(v1.6) Connected to llama.cpp at <b>${url}</b> · model <b>${modelName()}</b></i>`);
-      } else {
-        say(`<i>⚠️ llama.cpp at ${url} responded ${h.status} — will retry on generate.</i>`);
+      const u = new URL(primary);
+      if (u.hostname === 'localhost') {
+        out.push(primary.replace('://localhost', '://127.0.0.1'));
+      } else if (u.hostname === '127.0.0.1') {
+        out.push(primary.replace('://127.0.0.1', '://localhost'));
       }
-    } catch (e) {
-      say(`<i>⚠️ llama.cpp not reachable at ${url} yet (${e.message}). Start the server; Akari will use it when ready.</i>`);
+    } catch (_) {}
+    return out.filter((v, i, a) => a.indexOf(v) === i);
+  }
+
+  (async function bootStatus() {
+    for (const url of candidateOrigins()) {
+      try {
+        const h = await fetch(url + '/health', { method: 'GET' });
+        if (h.ok) {
+          // Remember working origin for this session
+          try {
+            const servers = JSON.parse(localStorage.getItem('lcpp_servers') || '[]');
+            const entry = { url: url, model: modelName(), online: true };
+            const rest = servers.filter(s => s && s.url !== url && s.url !== url.replace('localhost', '127.0.0.1') && s.url !== url.replace('127.0.0.1', 'localhost'));
+            localStorage.setItem('lcpp_servers', JSON.stringify([entry].concat(rest)));
+          } catch (_) {}
+          say(`<i>(v1.7) Connected to llama.cpp at <b>${url}</b> · model <b>${modelName()}</b></i>`);
+          return;
+        }
+      } catch (_) {}
     }
+    say(`<i>⚠️ llama.cpp not reachable yet (tried ${candidateOrigins().join(', ')}). Start the server; Akari will retry on generate.</i>`);
   })();
 
   let _lastPromptRev = null;
@@ -122,65 +181,39 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
     return new Promise(r => setTimeout(r, ms));
   }
 
-  /** Poll until server is ready (ok / not loading / has a free slot). No short client timeout. */
   async function waitUntilServerReady(url, signal) {
     let attempt = 0;
     for (;;) {
       if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
       try {
         const h = await fetch(url + '/health', { method: 'GET', signal });
-        if (h.status === 503) {
-          // loading model or no slot — keep waiting
-          if (attempt === 0 || attempt % 5 === 0) {
-            say(`<i>llama.cpp is busy/loading — queued (try ${attempt + 1})…</i>`);
-          }
-        } else if (h.ok) {
-          // Optional: inspect slots if exposed
+        if (h.ok) {
           try {
             const slotsRes = await fetch(url + '/slots', { method: 'GET', signal });
             if (slotsRes.ok) {
               const slots = await slotsRes.json();
-              if (Array.isArray(slots)) {
+              if (Array.isArray(slots) && slots.length) {
                 const idle = slots.filter(s => s && (s.is_processing === false || s.state === 'idle')).length;
-                const busy = slots.length - idle;
-                if (idle === 0 && slots.length > 0) {
-                  if (attempt === 0 || attempt % 5 === 0) {
-                    say(`<i>All ${slots.length} slots busy — waiting for a free slot…</i>`);
-                  }
+                if (idle === 0) {
+                  if (attempt % 5 === 0) say(`<i>All slots busy — waiting…</i>`);
                   attempt++;
                   await sleep(Math.min(2000 + attempt * 250, 8000));
                   continue;
                 }
-                if (attempt > 0) {
-                  say(`<i>Slot free (${idle} idle / ${busy} busy) — starting generation…</i>`);
-                }
               }
             }
-          } catch (_) { /* /slots optional */ }
-          try {
-            const propsRes = await fetch(url + '/props', { method: 'GET', signal });
-            if (propsRes.ok) {
-              const props = await propsRes.json();
-              if (props && props.is_sleeping) {
-                say('<i>llama.cpp was sleeping — waking model…</i>');
-                // next completion request wakes it; health may still be ok
-              }
-            }
-          } catch (_) { /* /props optional */ }
+          } catch (_) {}
           return;
         }
       } catch (e) {
         if (e && e.name === 'AbortError') throw e;
-        if (attempt === 0 || attempt % 5 === 0) {
-          say(`<i>Waiting for llama.cpp at ${url}… (${e.message})</i>`);
-        }
+        if (attempt % 5 === 0) say(`<i>Waiting for llama.cpp at ${url}…</i>`);
       }
       attempt++;
       await sleep(Math.min(1500 + attempt * 200, 6000));
     }
   }
 
-  /** Stream OpenAI-compatible SSE from llama-server. Keeps the socket alive for long gens. */
   async function streamChatCompletions(url, body, signal) {
     const res = await fetch(url + '/v1/chat/completions', {
       method: 'POST',
@@ -188,7 +221,6 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
       signal,
       body: JSON.stringify(body)
     });
-
     if (res.status === 503) {
       const err = new Error('no slot / unavailable');
       err.status = 503;
@@ -201,24 +233,19 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
       err.status = res.status;
       throw err;
     }
-
-    // Non-stream fallback if server ignored stream:true
     const ctype = (res.headers.get('content-type') || '').toLowerCase();
     if (!ctype.includes('text/event-stream') && !ctype.includes('stream')) {
       const data = await res.json();
       return (data?.choices?.[0]?.message?.content) || '';
     }
-
     if (!res.body || !res.body.getReader) {
       const data = await res.json();
       return (data?.choices?.[0]?.message?.content) || '';
     }
-
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
     let text = '';
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -227,7 +254,7 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
       buf = parts.pop() || '';
       for (const line of parts) {
         const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith(':')) continue; // SSE comment / keep-alive ping
+        if (!trimmed || trimmed.startsWith(':')) continue;
         if (!trimmed.startsWith('data:')) continue;
         const payload = trimmed.slice(5).trim();
         if (payload === '[DONE]') continue;
@@ -238,7 +265,7 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
             ?? json?.content
             ?? '';
           if (delta) text += delta;
-        } catch (_) { /* partial JSON */ }
+        } catch (_) {}
       }
     }
     return text;
@@ -246,10 +273,7 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
 
   globalThis.GenerateResponse = async function (hinp) {
     if (!hinp) return;
-    const url = baseUrl();
-
     if (window.AkariChat) AkariChat.append('user', hinp, { provider: 'lcpp' });
-
     const messages = messagesForRequest(hinp);
 
     try {
@@ -257,47 +281,51 @@ Use tools when they help (time, search, apps, reminders, etc.). Do not invent to
       __lcppAbort = new AbortController();
       const signal = __lcppAbort.signal;
 
-      // Wait for health / free slot — does not time out the generation itself
-      await waitUntilServerReady(url, signal);
-
-      const body = {
-        model: modelName(),
-        messages,
-        max_tokens: 1000,
-        stream: true
-      };
-
-      let text = '';
-      let tries = 0;
-      for (;;) {
+      // Try primary host, then localhost↔127.0.0.1 twin
+      let lastErr = null;
+      for (const url of candidateOrigins()) {
         try {
-          text = await streamChatCompletions(url, body, signal);
-          break;
+          await waitUntilServerReady(url, signal);
+          const body = {
+            model: modelName(),
+            messages,
+            max_tokens: 1000,
+            stream: true
+          };
+          let text = '';
+          let tries = 0;
+          for (;;) {
+            try {
+              text = await streamChatCompletions(url, body, signal);
+              break;
+            } catch (e) {
+              if (e && e.name === 'AbortError') throw e;
+              if (e.status === 503 || /no slot|unavailable|loading/i.test(String(e.message || ''))) {
+                tries++;
+                if (tries > 40) throw e;
+                say(`<i>Server queue full — retry ${tries}…</i>`);
+                await sleep(Math.min(1000 * tries, 8000));
+                await waitUntilServerReady(url, signal);
+                continue;
+              }
+              throw e;
+            }
+          }
+          if (!text) {
+            say('<i>⚠️ Received an empty or unexpected response.</i>');
+            return;
+          }
+          text = text.replace(/<\/?s>|<\|end(?:_of_turn|_of_text)?\|>|<\|eot_id\|>/g, '').trim();
+          if (window.AkariChat) AkariChat.append('assistant', text, { provider: 'lcpp' });
+          say(text);
+          return text;
         } catch (e) {
           if (e && e.name === 'AbortError') throw e;
-          // Retry when all slots full or model still waking
-          if (e.status === 503 || /no slot|unavailable|loading/i.test(String(e.message || ''))) {
-            tries++;
-            if (tries > 40) throw e;
-            say(`<i>Server queue full — retry ${tries}…</i>`);
-            await sleep(Math.min(1000 * tries, 8000));
-            await waitUntilServerReady(url, signal);
-            continue;
-          }
-          throw e;
+          lastErr = e;
+          console.warn('[lcpp] failed at', url, e);
         }
       }
-
-      if (!text) {
-        say('<i>⚠️ Received an empty or unexpected response.</i>');
-        return;
-      }
-
-      text = text.replace(/<\/?s>|<\|end(?:_of_turn|_of_text)?\|>|<\|eot_id\|>/g, '').trim();
-
-      if (window.AkariChat) AkariChat.append('assistant', text, { provider: 'lcpp' });
-      say(text);
-      return text;
+      throw lastErr || new Error('No llama.cpp endpoint reachable');
     } catch (err) {
       if (err && err.name === 'AbortError') { console.log('[lcpp] inference aborted'); return; }
       say(`<i>⚠️ Connection error: ${err.message}</i>`);
