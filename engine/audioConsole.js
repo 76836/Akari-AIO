@@ -256,9 +256,12 @@
                 statusBar.classList.add('active', 'processing');
                 if (btn) { btn.className = 'button-long mic-on'; btn.innerText = 'Processing...'; }
                 apStatus('Transcribing speech…', { busy: true });
+                // Only after a real wake→prompt arm (never on random speech)
                 try {
-                    if (window.AioThinkingSignal && window.AioThinkingSignal.start) {
-                        window.AioThinkingSignal.start();
+                    if (window.__ac41CommandArmed !== false && window.__ac41HadWakeForSignal) {
+                        if (window.AioThinkingSignal && window.AioThinkingSignal.start) {
+                            window.AioThinkingSignal.start();
+                        }
                     }
                 } catch (_) {}
                 break;
@@ -266,11 +269,7 @@
                 statusBar.classList.add('active', 'result');
                 if (btn) { btn.className = 'button-long mic-on'; btn.innerText = '✓'; }
                 apStatus('Command received', { busy: false, idle: true });
-                try {
-                    if (window.AioThinkingSignal && window.AioThinkingSignal.stop) {
-                        window.AioThinkingSignal.stop(400);
-                    }
-                } catch (_) {}
+                // Thinking signal keeps playing through LLM until speak()/tts-start
                 if (resultFlashTimer) clearTimeout(resultFlashTimer);
                 resultFlashTimer = setTimeout(() => setVisualState('idle'), 800);
                 break;
@@ -361,23 +360,40 @@
         window.__ac41AsrBlocked = false;
         if (!voiceInstance) return;
         const now = Date.now();
+        // One-shot: valid only until the next finalized command (or cancel)
+        window.__ac41CommandArmed = true;
+        voiceInstance.__ac41ArmAt = now;
         voiceInstance.wakeSoundDetectedTime = now;
         voiceInstance.lastWakeSoundScore = score != null ? score : 1;
-        // Stay armed until the user speaks (or cancel). Not an 8s wall clock.
-        voiceInstance._armUntil = now + 300000;
+        voiceInstance._armUntil = now + 120000; // safety ceiling only; cleared after one command
         voiceInstance._armKind = 'wake-prompt';
         setVisualState('listening');
         apStatus('Prompt done — listening…', { busy: true });
-        // --non-blocking-VAD: open STT stream immediately (do not wait for VAD speech-start)
         if (lsBool('aio_nonBlockingVad', false) && voiceInstance.srProvider
             && typeof voiceInstance.srProvider.startStreaming === 'function') {
             try {
                 voiceInstance.srProvider.startStreaming();
-                console.log('[AudioConsole] non-blocking VAD — STT streaming after wake');
+                console.log('[AudioConsole] non-blocking VAD — STT streaming after prompt');
             } catch (e) {
                 console.warn('[AudioConsole] startStreaming failed', e);
             }
         }
+    }
+
+    function disarmCommandArm(why) {
+        window.__ac41CommandArmed = false;
+        if (voiceInstance) {
+            voiceInstance._armUntil = 0;
+            voiceInstance.wakeSoundDetectedTime = null;
+            voiceInstance.__ac41ArmAt = 0;
+            if (voiceInstance.srProvider && typeof voiceInstance.srProvider.stopStreaming === 'function') {
+                try { voiceInstance.srProvider.stopStreaming(); } catch (_) {}
+            }
+        }
+        if (why === 'result' || why === 'mic-stop') {
+            // keep __ac41HadWakeForSignal until TTS starts so signal can still play through LLM
+        }
+        console.log('[AudioConsole] disarmed:', why || '');
     }
 
     // Gate ASR until after wake chime/greeting so only post-wake speech is transcribed
@@ -569,7 +585,7 @@
             const _prog = (p, t) => window.dispatchEvent(new CustomEvent('audioConsoleProgress', { detail: { percent: p, text: t } }));
             try {
                 _prog(18, 'Importing Audio Console module…');
-                const mod = await import('./vendor/audioConsole-4.2.1.js?v=prompt-arm-2');
+                const mod = await import('./vendor/audioConsole-4.2.1.js?v=wake-oneshot-1');
                 const { AkarinetVoice } = mod;
                 _prog(25, 'Engine loaded — preparing ${sr}…');
                 const config = ${JSON.stringify(config)};
@@ -601,7 +617,7 @@
             clearTimeout(initWatchdog);
             clearTimeout(initStuck);
             try { restoreFetch(); } catch (_) {}
-            acLoadFail('could not load audioConsole-4.2.1.js?v=prompt-arm-2 (network or CDN)');
+            acLoadFail('could not load audioConsole-4.2.1.js?v=wake-oneshot-1 (network or CDN)');
         };
 
         window.__ac41RestoreFetch = restoreFetch;
@@ -631,12 +647,24 @@
                     this._log && this._log('INFO', 'ASR gated — wake prompt still playing');
                     return;
                 }
-                // After prompt arm: any speech-end while _armUntil is valid is in-session
-                if (this._armUntil && Date.now() < this._armUntil) {
-                    if (!this.wakeSoundDetectedTime || this.wakeSoundDetectedTime < (this.speechStartTime || 0)) {
-                        this.wakeSoundDetectedTime = this.speechStartTime || Date.now();
+                // Wake word required: only accept speech after armListenAfterPrompt
+                if (!window.__ac41CommandArmed) {
+                    this._log && this._log('INFO', 'Skipping ASR — no wake/prompt arm');
+                    this.dispatchEvent(new CustomEvent('speechdiscarded', { detail: '(Waiting for Wake Word)' }));
+                    return;
+                }
+                // Trim audio that began before the prompt finished (drops "hey akari" prefix)
+                const armAt = this.__ac41ArmAt || 0;
+                if (armAt && this.speechStartTime && this.speechStartTime < armAt && audio && audio.length) {
+                    const trimMs = armAt - this.speechStartTime;
+                    const trimSamples = Math.floor((trimMs / 1000) * 16000);
+                    if (trimSamples > 0 && audio.length > trimSamples + 2000) {
+                        audio = audio.slice(trimSamples);
+                        this._log && this._log('INFO', 'Trimmed ' + trimMs + 'ms pre-prompt audio from segment');
                     }
                 }
+                // Stamp wake for core inSession check (we already verified command arm)
+                this.wakeSoundDetectedTime = this.speechStartTime || Date.now();
                 return _hs(audio);
             };
             voiceInstance.__ac41GateWrapped = true;
@@ -648,6 +676,7 @@
         // Core _onWakeDetect already stamped wakeSoundDetectedTime at detect time.
         // Clear it until the prompt finishes so speech during the prompt is not a command.
         window.__ac41AsrBlocked = true;
+        window.__ac41HadWakeForSignal = true; // allows thinking signal for this command cycle
         if (voiceInstance) {
             voiceInstance.wakeSoundDetectedTime = null;
             if (voiceInstance.srProvider && typeof voiceInstance.srProvider.stopStreaming === 'function') {
@@ -682,6 +711,7 @@
     });
     window.addEventListener('audioConsoleResult', (e) => {
         clearProcessingSafety();
+        disarmCommandArm('result');
         if (window.app) app.isSilentMode = false;
         if (window.bubble_incoming) window.bubble_incoming(e.detail.text);
         if (window.app?.ui?.setTyping) app.ui.setTyping('Akari');
@@ -760,6 +790,7 @@
                 continuedArmTimer = null;
             }
             const v = window.__ac41Voice || voiceInstance;
+            disarmCommandArm('mic-stop');
             if (v && typeof v.cancelProcessing === 'function') {
                 v.cancelProcessing();
             } else if (v) {

@@ -1,5 +1,6 @@
 /**
- * Akari-AIO thinking indicator — low marimba loop while command is processing.
+ * Thinking indicator: plays after a wake-armed command reaches processing.
+ * Stops only when spoken response synthesis begins (akari:tts-start / speak).
  */
 (function () {
   'use strict';
@@ -67,14 +68,11 @@
     });
   }
 
-  function armUnlock() {
-    unlock();
-  }
+  function armUnlock() { unlock(); }
   ['pointerdown', 'keydown', 'touchstart', 'click'].forEach(function (ev) {
     window.addEventListener(ev, armUnlock, { passive: true, capture: true });
   });
   window.addEventListener('audioConsoleWakeSound', armUnlock);
-  window.addEventListener('audioConsoleSpeechStart', armUnlock);
 
   function hardStop() {
     if (stopFn) {
@@ -84,32 +82,28 @@
   }
 
   function startLoop() {
-    if (!enabled()) {
-      console.log('[thinkingSignal] off (enable in Settings)');
+    if (!enabled()) return;
+    // Must be a wake-driven command cycle
+    if (!window.__ac41HadWakeForSignal) {
+      console.log('[thinkingSignal] skip — no wake for this cycle');
       return;
     }
     hardStop();
     fading = false;
-
     unlock().then(function () {
-      if (!enabled()) return;
+      if (!enabled() || !window.__ac41HadWakeForSignal) return;
       var c = ensureCtx();
       if (!c) return;
-      if (c.state !== 'running') {
-        c.resume().catch(function () {});
-      }
+      if (c.state !== 'running') c.resume().catch(function () {});
       try {
         master.gain.cancelScheduledValues(c.currentTime);
         master.gain.setValueAtTime(0.65, c.currentTime);
       } catch (_) {}
-
-      // Slightly higher than pure bass so laptop speakers can hear it (still "low marimba")
       var m = [0, 7, 3, 10, 7, 12, 3, 7];
       var i = 0;
       var nextT = c.currentTime + 0.1;
       var timer = null;
       var stopped = false;
-
       function tick() {
         if (stopped) return;
         var now = c.currentTime;
@@ -130,7 +124,7 @@
         if (timer) clearTimeout(timer);
         timer = null;
       };
-      console.log('[thinkingSignal] playing, ctx=' + c.state);
+      console.log('[thinkingSignal] playing');
     });
   }
 
@@ -158,19 +152,15 @@
       hardStop();
       fading = false;
     }
+    // End of thinking cycle
+    window.__ac41HadWakeForSignal = false;
   }
 
   window.AioThinkingSignal = { start: startLoop, stop: fadeOut, unlock: unlock, enabled: enabled };
 
   window.addEventListener('audioConsoleProcessing', startLoop);
+  // ONLY stop when synthesis begins — not on STT result / processing end
   window.addEventListener('akari:tts-start', function () { fadeOut(700); });
-  window.addEventListener('akari:tts-end', function () { fadeOut(400); });
-  window.addEventListener('audioConsoleProcessingEnd', function () {
-    setTimeout(function () {
-      if (stopFn) fadeOut(500);
-    }, 800);
-  });
-  window.addEventListener('audioConsoleResult', function () { fadeOut(400); });
 
   function wrapSpeak() {
     if (typeof window.speak !== 'function' || window.speak.__aioSignalWrapped) {
