@@ -1,7 +1,8 @@
 /**
- * Thinking indicator — single instance only.
- * Starts after wake-armed processing; stops when spoken synthesis begins.
- * A newer start/stop always cancels any previous loop (no stacked audio).
+ * Thinking indicator — minimal.
+ * Start: akari:thinking-start (armed ASR about to run)
+ * Stop:  akari:tts-start / speak() (spoken response begins)
+ * Never stacks: one generation, kill previous before start.
  */
 (function () {
   'use strict';
@@ -19,36 +20,14 @@
 
   var ctx = null;
   var master = null;
-  var stopFn = null;
-  var fading = false;
-  var gen = 0; // bumped on every start/stop — invalidates in-flight async work
+  var timer = null;
+  var gen = 0;
 
   function midi(n) {
     return 440 * Math.pow(2, (n - 69) / 12);
   }
 
-  function note(audioCtx, dest, t, o) {
-    var osc = audioCtx.createOscillator();
-    var g = audioCtx.createGain();
-    var f = audioCtx.createBiquadFilter();
-    osc.type = o.type || 'sine';
-    osc.frequency.setValueAtTime(o.f, t);
-    f.type = 'lowpass';
-    f.frequency.setValueAtTime(o.lp || 5000, t);
-    var vol = (o.vol != null ? o.vol : 0.5) * 0.55;
-    var a = o.a != null ? o.a : 0.005;
-    var dur = o.dur != null ? o.dur : 0.3;
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), t + a);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(a + 0.02, dur));
-    osc.connect(f);
-    f.connect(g);
-    g.connect(dest);
-    osc.start(t);
-    osc.stop(t + dur + 0.08);
-  }
-
-  function ensureCtx() {
+  function ensure() {
     if (ctx) return ctx;
     var AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return null;
@@ -59,92 +38,65 @@
     return ctx;
   }
 
-  function rebuildMaster() {
-    if (!ctx) return;
-    try {
-      if (master) master.disconnect();
-    } catch (_) {}
-    master = ctx.createGain();
-    master.gain.value = 0;
-    master.connect(ctx.destination);
-  }
-
-  function unlock() {
-    var c = ensureCtx();
-    if (!c) return Promise.resolve(false);
-    if (c.state === 'running') return Promise.resolve(true);
-    return c.resume().then(function () {
-      return c.state === 'running';
-    }).catch(function () {
-      return false;
-    });
-  }
-
-  function armUnlock() {
-    unlock();
-  }
-  ['pointerdown', 'keydown', 'touchstart', 'click'].forEach(function (ev) {
-    window.addEventListener(ev, armUnlock, { passive: true, capture: true });
-  });
-  window.addEventListener('audioConsoleWakeSound', armUnlock);
-
-  function hardStopScheduler() {
-    if (stopFn) {
-      try {
-        stopFn();
-      } catch (_) {}
-      stopFn = null;
-    }
-  }
-
-  /** Kill any playing/scheduled notes immediately (no stack). */
-  function hardKill() {
+  function kill() {
     gen++;
-    hardStopScheduler();
-    fading = false;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
     if (ctx && master) {
       try {
         master.gain.cancelScheduledValues(ctx.currentTime);
         master.gain.setValueAtTime(0, ctx.currentTime);
       } catch (_) {}
-      rebuildMaster();
+      try {
+        master.disconnect();
+      } catch (_) {}
+      master = ctx.createGain();
+      master.gain.value = 0;
+      master.connect(ctx.destination);
     }
   }
 
-  function startLoop() {
+  function note(c, dest, t, o) {
+    var osc = c.createOscillator();
+    var g = c.createGain();
+    var f = c.createBiquadFilter();
+    osc.type = o.type || 'sine';
+    osc.frequency.setValueAtTime(o.f, t);
+    f.type = 'lowpass';
+    f.frequency.setValueAtTime(o.lp || 5000, t);
+    var vol = (o.vol || 0.5) * 0.55;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), t + (o.a || 0.005));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + (o.dur || 0.3));
+    osc.connect(f);
+    f.connect(g);
+    g.connect(dest);
+    osc.start(t);
+    osc.stop(t + (o.dur || 0.3) + 0.05);
+  }
+
+  function start() {
     if (!enabled()) return;
-    if (!window.__ac41HadWakeForSignal) {
-      console.log('[thinkingSignal] skip — no wake for this cycle');
-      return;
-    }
-
-    hardKill();
-    var myGen = gen;
-    fading = false;
-
-    unlock().then(function () {
-      if (myGen !== gen) return; // superseded by newer start/stop
-      if (!enabled() || !window.__ac41HadWakeForSignal) return;
-      var c = ensureCtx();
-      if (!c || !master) return;
-      if (c.state !== 'running') c.resume().catch(function () {});
-
+    kill();
+    var my = gen;
+    var c = ensure();
+    if (!c) return;
+    var go = function () {
+      if (my !== gen) return;
+      if (!master) return;
       try {
-        master.gain.cancelScheduledValues(c.currentTime);
         master.gain.setValueAtTime(0.65, c.currentTime);
       } catch (_) {}
-
       var m = [0, 7, 3, 10, 7, 12, 3, 7];
       var i = 0;
-      var nextT = c.currentTime + 0.1;
-      var timer = null;
-      var stopped = false;
-
+      var nextT = c.currentTime + 0.08;
       function tick() {
-        if (stopped || myGen !== gen) return;
+        if (my !== gen) return;
         var now = c.currentTime;
         if (nextT < now - 0.05) nextT = now + 0.05;
-        while (nextT < now + 0.45) {
+        while (nextT < now + 0.4) {
           var f = midi(45 + m[i % 8] + (i % 32 >= 16 ? 5 : 0));
           note(c, master, nextT, { f: f, dur: 0.5, vol: 0.75, a: 0.003 });
           note(c, master, nextT, { type: 'triangle', f: f * 2, dur: 0.25, vol: 0.25, a: 0.002, lp: 2000 });
@@ -155,64 +107,57 @@
         timer = setTimeout(tick, 50);
       }
       tick();
-      stopFn = function () {
-        stopped = true;
-        if (timer) clearTimeout(timer);
-        timer = null;
-      };
-      console.log('[thinkingSignal] playing gen=' + myGen);
-    });
+      console.log('[thinkingSignal] on');
+    };
+    if (c.state === 'running') go();
+    else c.resume().then(go).catch(function () {});
   }
 
-  function fadeOut(ms) {
-    if (ms === 0 || ms === '0') {
-      hardKill();
-      window.__ac41HadWakeForSignal = false;
+  function stop(ms) {
+    if (ms === 0) {
+      kill();
       return;
     }
-    if (!stopFn && !master) {
-      window.__ac41HadWakeForSignal = false;
-      return;
-    }
-    if (fading) {
-      hardKill();
-      window.__ac41HadWakeForSignal = false;
-      return;
-    }
-    fading = true;
-    var myGen = gen;
-    var durMs = ms != null ? ms : 700;
     var c = ctx;
+    var my = gen;
+    var dur = (ms != null ? ms : 600) / 1000;
     if (c && master) {
-      var t0 = c.currentTime;
       try {
+        var t0 = c.currentTime;
         master.gain.cancelScheduledValues(t0);
         master.gain.setValueAtTime(Math.max(0.0001, master.gain.value || 0.65), t0);
-        master.gain.linearRampToValueAtTime(0.0001, t0 + durMs / 1000);
+        master.gain.linearRampToValueAtTime(0.0001, t0 + dur);
       } catch (_) {}
       setTimeout(function () {
-        if (myGen !== gen) return;
-        hardStopScheduler();
-        fading = false;
-        rebuildMaster();
-      }, durMs + 80);
+        if (my === gen) kill();
+      }, (ms != null ? ms : 600) + 50);
     } else {
-      hardKill();
+      kill();
     }
-    window.__ac41HadWakeForSignal = false;
+    console.log('[thinkingSignal] off');
   }
 
-  window.AioThinkingSignal = {
-    start: startLoop,
-    stop: fadeOut,
-    kill: hardKill,
-    unlock: unlock,
-    enabled: enabled
-  };
+  // Unlock audio on first gesture / wake
+  function unlock() {
+    var c = ensure();
+    if (c && c.state !== 'running') c.resume().catch(function () {});
+  }
+  ['pointerdown', 'click', 'keydown', 'touchstart'].forEach(function (ev) {
+    window.addEventListener(ev, unlock, { passive: true, capture: true });
+  });
+  window.addEventListener('audioConsoleWakeSound', unlock);
 
-  window.addEventListener('audioConsoleProcessing', startLoop);
+  window.AioThinkingSignal = { start: start, stop: stop, kill: kill };
+
+  // Single start event from audio console when armed ASR runs
+  window.addEventListener('akari:thinking-start', start);
+  // Also accept processing as backup if thinking-start missed
+  window.addEventListener('audioConsoleProcessing', function () {
+    if (window.__ac41HadWakeForSignal || window.__ac41CommandArmed) start();
+  });
+  // Stop only when spoken reply begins
   window.addEventListener('akari:tts-start', function () {
-    fadeOut(700);
+    stop(700);
   });
 
   function wrapSpeak() {
@@ -224,16 +169,16 @@
       try {
         window.dispatchEvent(new CustomEvent('akari:tts-start'));
       } catch (_) {}
-      fadeOut(700);
+      stop(700);
       return orig.apply(this, arguments);
     };
     window.speak.__aioSignalWrapped = true;
     return true;
   }
   if (!wrapSpeak()) {
-    var tries = 0;
-    var iv = setInterval(function () {
-      if (wrapSpeak() || ++tries > 80) clearInterval(iv);
+    var n = 0;
+    var id = setInterval(function () {
+      if (wrapSpeak() || ++n > 80) clearInterval(id);
     }, 400);
   }
 })();

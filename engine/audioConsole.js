@@ -256,14 +256,6 @@
                 statusBar.classList.add('active', 'processing');
                 if (btn) { btn.className = 'button-long mic-on'; btn.innerText = 'Processing...'; }
                 apStatus('Transcribing speech…', { busy: true });
-                // Only after a real wake→prompt arm (never on random speech)
-                try {
-                    if (window.__ac41CommandArmed !== false && window.__ac41HadWakeForSignal) {
-                        if (window.AioThinkingSignal && window.AioThinkingSignal.start) {
-                            window.AioThinkingSignal.start();
-                        }
-                    }
-                } catch (_) {}
                 break;
             case 'result':
                 statusBar.classList.add('active', 'result');
@@ -295,7 +287,10 @@
         wakeAudio.volume = 1.0;
     }
     const WAKE_GREETINGS = ["what's up?", "hey", "hello", "hi", "yeah?"];
-    /** Resolves only when the audible wake prompt has finished (TTS end or Summon.mp3 ended). */
+    /**
+     * One prompt only: spoken greeting XOR Summon.mp3 — never both.
+     * Resolves when that single prompt has finished.
+     */
     function playWakeSound() {
         return new Promise((resolve) => {
             let done = false;
@@ -305,55 +300,43 @@
                 console.log('[AudioConsole] prompt done:', why);
                 resolve();
             };
-            const playSummon = () => {
-                if (!wakeAudio) {
-                    try {
-                        wakeAudio = new Audio('./characters/akari/Summon.mp3');
-                        wakeAudio.preload = 'auto';
-                        wakeAudio.volume = 1.0;
-                    } catch (_) { finish('no-summon'); return; }
-                }
-                try {
-                    wakeAudio.onended = () => finish('summon-ended');
-                    wakeAudio.onerror = () => finish('summon-error');
-                    wakeAudio.currentTime = 0;
-                    const p = wakeAudio.play();
-                    if (p && p.catch) p.catch(() => finish('summon-play-fail'));
-                } catch (_) {
-                    finish('summon-throw');
-                }
-            };
+
+            // Prefer spoken line when enabled — do NOT also play Summon
             if (lsBool('ac41_ttsGreeting', false) && typeof window.speak === 'function') {
                 const phrase = WAKE_GREETINGS[Math.floor(Math.random() * WAKE_GREETINGS.length)];
-                let started = false;
-                const onStart = () => { started = true; };
-                const onEnd = () => {
-                    window.removeEventListener('akari:tts-start', onStart);
-                    finish('tts-end');
-                };
-                window.addEventListener('akari:tts-start', onStart, { once: true });
+                const onEnd = () => finish('tts-end');
                 window.addEventListener('akari:tts-end', onEnd, { once: true });
                 try {
                     window.speak(phrase);
                 } catch (e) {
-                    console.log('Wake TTS greeting failed:', e);
-                    window.removeEventListener('akari:tts-start', onStart);
+                    console.log('Wake TTS failed, Summon only:', e);
                     window.removeEventListener('akari:tts-end', onEnd);
-                    playSummon();
+                    playSummonOnly(finish);
                     return;
                 }
-                // If TTS never starts, do not leave the user waiting forever — use Summon
-                setTimeout(() => {
-                    if (done || started) return;
-                    console.log('[AudioConsole] TTS did not start — Summon.mp3 fallback');
-                    window.removeEventListener('akari:tts-start', onStart);
-                    window.removeEventListener('akari:tts-end', onEnd);
-                    playSummon();
-                }, 2000);
+                // Safety if tts-end never arrives (no overlap with Summon)
+                setTimeout(() => { if (!done) finish('tts-timeout'); }, 20000);
                 return;
             }
-            playSummon();
+            playSummonOnly(finish);
         });
+    }
+
+    function playSummonOnly(finish) {
+        try {
+            if (!wakeAudio) {
+                wakeAudio = new Audio('./characters/akari/Summon.mp3');
+                wakeAudio.preload = 'auto';
+                wakeAudio.volume = 1.0;
+            }
+            wakeAudio.onended = () => finish('summon-ended');
+            wakeAudio.onerror = () => finish('summon-error');
+            wakeAudio.currentTime = 0;
+            const p = wakeAudio.play();
+            if (p && p.catch) p.catch(() => finish('summon-play-fail'));
+        } catch (_) {
+            finish('summon-throw');
+        }
     }
 
     function armListenAfterPrompt(score) {
@@ -585,7 +568,7 @@
             const _prog = (p, t) => window.dispatchEvent(new CustomEvent('audioConsoleProgress', { detail: { percent: p, text: t } }));
             try {
                 _prog(18, 'Importing Audio Console module…');
-                const mod = await import('./vendor/audioConsole-4.2.1.js?v=seq-wake-vad3-1');
+                const mod = await import('./vendor/audioConsole-4.2.1.js?v=simple-prompt-1');
                 const { AkarinetVoice } = mod;
                 _prog(25, 'Engine loaded — preparing ${sr}…');
                 const config = ${JSON.stringify(config)};
@@ -617,7 +600,7 @@
             clearTimeout(initWatchdog);
             clearTimeout(initStuck);
             try { restoreFetch(); } catch (_) {}
-            acLoadFail('could not load audioConsole-4.2.1.js?v=seq-wake-vad3-1 (network or CDN)');
+            acLoadFail('could not load audioConsole-4.2.1.js?v=simple-prompt-1 (network or CDN)');
         };
 
         window.__ac41RestoreFetch = restoreFetch;
@@ -665,6 +648,9 @@
                 }
                 // Stamp wake for core inSession check (we already verified command arm)
                 this.wakeSoundDetectedTime = this.speechStartTime || Date.now();
+                try {
+                    window.dispatchEvent(new CustomEvent('akari:thinking-start'));
+                } catch (_) {}
                 return _hs(audio);
             };
             voiceInstance.__ac41GateWrapped = true;
